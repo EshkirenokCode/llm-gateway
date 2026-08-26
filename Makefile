@@ -2,7 +2,7 @@ BINARY  := gateway
 PKG     := ./...
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: help build run test lint fmt tidy docker clean
+.PHONY: help build run test test-docker lint fmt tidy docker clean
 
 help: ## Show available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -16,6 +16,9 @@ run: ## Run the gateway from source
 
 test: ## Run all tests with the race detector
 	go test -race -count=1 $(PKG)
+
+test-docker: ## Run tests with -race inside Linux (no gcc needed on the host)
+	docker run --rm -v "$(CURDIR)":/src -w /src golang:1.23-alpine sh -c "apk add --no-cache gcc musl-dev >/dev/null && go test -race -count=1 $(PKG)"
 
 lint: ## Run golangci-lint
 	golangci-lint run
