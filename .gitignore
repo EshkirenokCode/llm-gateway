@@ -1,0 +1,12 @@
+# binaries
+/bin/
+/gateway
+/gateway.exe
+
+# secrets and local config
+.env
+*.pem
+
+# test and tooling output
+coverage.out
+dist/
