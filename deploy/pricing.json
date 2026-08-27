@@ -1,0 +1,13 @@
+{
+  "fallback": {
+    "prompt_per_mtok": 1000000,
+    "completion_per_mtok": 3000000
+  },
+  "models": {
+    "gpt-4o": { "prompt_per_mtok": 2500000, "completion_per_mtok": 10000000 },
+    "gpt-4o-mini": { "prompt_per_mtok": 150000, "completion_per_mtok": 600000 },
+    "claude-sonnet-4": { "prompt_per_mtok": 3000000, "completion_per_mtok": 15000000 },
+    "claude-haiku-4-5": { "prompt_per_mtok": 1000000, "completion_per_mtok": 5000000 },
+    "mock": { "prompt_per_mtok": 200000, "completion_per_mtok": 400000 }
+  }
+}
