@@ -21,6 +21,8 @@ type Metrics struct {
 	overhead prometheus.Histogram
 	tokens   *prometheus.CounterVec
 	streamed *prometheus.CounterVec
+	cost     *prometheus.CounterVec
+	blocked  *prometheus.CounterVec
 }
 
 // NewMetrics creates the collectors and registers them.
@@ -60,9 +62,17 @@ func NewMetrics() *Metrics {
 			Name: "gateway_streams_total",
 			Help: "Streamed responses, by provider and how the stream ended.",
 		}, []string{"provider", "outcome"}),
+		cost: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "gateway_cost_usd_total",
+			Help: "Accounted spend in US dollars, by provider and model.",
+		}, []string{"provider", "model"}),
+		blocked: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "gateway_blocked_total",
+			Help: "Requests the gateway refused itself, by tenant and reason.",
+		}, []string{"tenant", "reason"}),
 	}
 
-	m.registry.MustRegister(m.requests, m.duration, m.inFlight, m.upstream, m.overhead, m.tokens, m.streamed)
+	m.registry.MustRegister(m.requests, m.duration, m.inFlight, m.upstream, m.overhead, m.tokens, m.streamed, m.cost, m.blocked)
 
 	return m
 }
@@ -79,6 +89,26 @@ func (m *Metrics) ObserveUpstream(provider, outcome string, d time.Duration) {
 func (m *Metrics) ObserveTokens(provider, model string, prompt, completion int) {
 	m.tokens.WithLabelValues(provider, model, "prompt").Add(float64(prompt))
 	m.tokens.WithLabelValues(provider, model, "completion").Add(float64(completion))
+}
+
+// ObserveCost records the money a request cost.
+func (m *Metrics) ObserveCost(provider, model string, usd float64) {
+	m.cost.WithLabelValues(provider, model).Add(usd)
+}
+
+// CountRateLimited records a request rejected by the rate limiter.
+func (m *Metrics) CountRateLimited(tenant string) {
+	m.blocked.WithLabelValues(tenant, "rate_limit").Inc()
+}
+
+// CountBudgetBlocked records a request rejected because the budget ran out.
+func (m *Metrics) CountBudgetBlocked(tenant string) {
+	m.blocked.WithLabelValues(tenant, "budget").Inc()
+}
+
+// CountIdempotentReplay records a response served from a stored result.
+func (m *Metrics) CountIdempotentReplay(tenant string) {
+	m.blocked.WithLabelValues(tenant, "idempotent_replay").Inc()
 }
 
 // ObserveStream records the outcome of a streamed response.

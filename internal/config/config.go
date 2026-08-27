@@ -24,7 +24,33 @@ type Config struct {
 	// ShutdownTimeout bounds how long in-flight requests may finish after a
 	// termination signal before the server is closed forcefully.
 	ShutdownTimeout time.Duration `env:"GATEWAY_SHUTDOWN_TIMEOUT" envDefault:"15s"`
+
+	// DatabaseURL enables tenants, accounting and budgets. Left empty the
+	// gateway runs as an open proxy with no persistence, which is useful for
+	// local experiments and load tests.
+	DatabaseURL string `env:"DATABASE_URL"`
+	// DBMaxConns caps the connection pool.
+	DBMaxConns int32 `env:"GATEWAY_DB_MAX_CONNS" envDefault:"10"`
+	// MigrateOnStart applies pending migrations during startup.
+	MigrateOnStart bool `env:"GATEWAY_MIGRATE_ON_START" envDefault:"true"`
+
+	// PricingFile overrides the built-in price list.
+	PricingFile string `env:"GATEWAY_PRICING_FILE"`
+
+	// KeyCacheTTL is how long an API key verdict is reused before the database
+	// is consulted again. It also bounds how long a revoked key keeps working.
+	KeyCacheTTL time.Duration `env:"GATEWAY_KEY_CACHE_TTL" envDefault:"30s"`
+	// BudgetCacheTTL is how long a tenant spend total is reused.
+	BudgetCacheTTL time.Duration `env:"GATEWAY_BUDGET_CACHE_TTL" envDefault:"15s"`
+	// IdempotencyTTL is how long a stored response can be replayed.
+	IdempotencyTTL time.Duration `env:"GATEWAY_IDEMPOTENCY_TTL" envDefault:"24h"`
+	// RateLimitBurstRatio is the share of a minute allowance that may be spent
+	// at once.
+	RateLimitBurstRatio float64 `env:"GATEWAY_RATE_LIMIT_BURST_RATIO" envDefault:"0.25"`
 }
+
+// PersistenceEnabled reports whether the gateway was given a database.
+func (c Config) PersistenceEnabled() bool { return strings.TrimSpace(c.DatabaseURL) != "" }
 
 // Load reads the configuration from the process environment and validates it.
 func Load() (Config, error) {
@@ -56,6 +82,26 @@ func (c Config) Validate() error {
 
 	if c.ShutdownTimeout <= 0 {
 		return fmt.Errorf("GATEWAY_SHUTDOWN_TIMEOUT must be positive, got %s", c.ShutdownTimeout)
+	}
+
+	if c.DBMaxConns <= 0 {
+		return fmt.Errorf("GATEWAY_DB_MAX_CONNS must be positive, got %d", c.DBMaxConns)
+	}
+
+	if c.KeyCacheTTL < 0 {
+		return fmt.Errorf("GATEWAY_KEY_CACHE_TTL must not be negative")
+	}
+
+	if c.BudgetCacheTTL <= 0 {
+		return fmt.Errorf("GATEWAY_BUDGET_CACHE_TTL must be positive, got %s", c.BudgetCacheTTL)
+	}
+
+	if c.IdempotencyTTL <= 0 {
+		return fmt.Errorf("GATEWAY_IDEMPOTENCY_TTL must be positive, got %s", c.IdempotencyTTL)
+	}
+
+	if c.RateLimitBurstRatio <= 0 || c.RateLimitBurstRatio > 1 {
+		return fmt.Errorf("GATEWAY_RATE_LIMIT_BURST_RATIO must be in (0, 1], got %v", c.RateLimitBurstRatio)
 	}
 
 	return nil

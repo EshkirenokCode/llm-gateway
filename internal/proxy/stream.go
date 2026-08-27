@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/EshkirenokCode/llm-gateway/internal/auth"
 	"github.com/EshkirenokCode/llm-gateway/internal/providers"
 )
 
@@ -39,7 +41,7 @@ type streamUsage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
-func (h *Handler) streamCompletions(w http.ResponseWriter, r *http.Request, req providers.ChatRequest) {
+func (h *Handler) streamCompletions(w http.ResponseWriter, r *http.Request, req providers.ChatRequest, identity auth.Identity, hasIdentity bool) {
 	// Without a flusher the response is buffered and the client sees nothing
 	// until the whole answer is ready, which defeats streaming.
 	flusher, ok := w.(http.Flusher)
@@ -57,6 +59,8 @@ func (h *Handler) streamCompletions(w http.ResponseWriter, r *http.Request, req 
 		}
 		h.metrics.ObserveStream(h.provider.Name(), "start_failed")
 		h.logger.Error("upstream stream failed to start", "provider", h.provider.Name(), "error", err)
+		h.record(ctx, identity, hasIdentity, req.Model, true, http.StatusBadGateway,
+			providers.Usage{}, 0, 0, err.Error())
 		writeError(w, http.StatusBadGateway, "api_error", "upstream provider failed")
 		return
 	}
@@ -73,6 +77,7 @@ func (h *Handler) streamCompletions(w http.ResponseWriter, r *http.Request, req 
 
 	start := time.Now()
 	first := true
+	var usage providers.Usage
 	for {
 		chunk, err := stream.Recv()
 		if errors.Is(err, io.EOF) {
@@ -82,10 +87,12 @@ func (h *Handler) streamCompletions(w http.ResponseWriter, r *http.Request, req 
 			if ctx.Err() != nil {
 				h.logger.Info("client disconnected mid-stream", "provider", h.provider.Name())
 				h.metrics.ObserveStream(h.provider.Name(), "client_gone")
+				h.finishStream(ctx, identity, hasIdentity, stream.Model(), usage, time.Since(start), "client disconnected")
 				return
 			}
 			h.logger.Error("stream aborted", "provider", h.provider.Name(), "error", err)
 			h.metrics.ObserveStream(h.provider.Name(), "error")
+			h.finishStream(ctx, identity, hasIdentity, stream.Model(), usage, time.Since(start), err.Error())
 			return
 		}
 
@@ -109,6 +116,7 @@ func (h *Handler) streamCompletions(w http.ResponseWriter, r *http.Request, req 
 		}
 
 		if chunk.Usage != nil {
+			usage = *chunk.Usage
 			h.metrics.ObserveTokens(h.provider.Name(), stream.Model(), chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens)
 			event.Usage = &streamUsage{
 				PromptTokens:     chunk.Usage.PromptTokens,
@@ -120,6 +128,7 @@ func (h *Handler) streamCompletions(w http.ResponseWriter, r *http.Request, req 
 		if err := writeEvent(w, event); err != nil {
 			h.logger.Info("stopped writing to client", "error", err)
 			h.metrics.ObserveStream(h.provider.Name(), "write_failed")
+			h.finishStream(ctx, identity, hasIdentity, stream.Model(), usage, time.Since(start), err.Error())
 			return
 		}
 		flusher.Flush()
@@ -127,6 +136,7 @@ func (h *Handler) streamCompletions(w http.ResponseWriter, r *http.Request, req 
 
 	h.metrics.ObserveUpstream(h.provider.Name(), "success", time.Since(start))
 	h.metrics.ObserveStream(h.provider.Name(), "completed")
+	h.finishStream(ctx, identity, hasIdentity, stream.Model(), usage, time.Since(start), "")
 
 	// The sentinel tells OpenAI clients the stream ended normally.
 	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
@@ -144,4 +154,30 @@ func writeEvent(w io.Writer, event streamChunk) error {
 		return fmt.Errorf("write chunk: %w", err)
 	}
 	return nil
+}
+
+// finishStream records what a streamed request consumed. Token counts only
+// arrive with the final chunk, so an aborted stream is billed for whatever was
+// reported before it stopped, which is usually nothing. That undercharge is
+// deliberate: guessing the tokens would be worse than recording zero.
+func (h *Handler) finishStream(ctx context.Context, identity auth.Identity, hasIdentity bool, model string, usage providers.Usage, elapsed time.Duration, errMsg string) {
+	if !hasIdentity || h.store == nil {
+		return
+	}
+
+	cost := h.pricing.Cost(model, usage.PromptTokens, usage.CompletionTokens)
+
+	status := http.StatusOK
+	if errMsg != "" {
+		status = http.StatusBadGateway
+	}
+
+	h.record(ctx, identity, hasIdentity, model, true, status, usage, cost, elapsed, errMsg)
+
+	if cost > 0 {
+		h.metrics.ObserveCost(h.provider.Name(), model, cost.Dollars())
+		if h.budget != nil {
+			h.budget.Record(identity.TenantID, cost)
+		}
+	}
 }

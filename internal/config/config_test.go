@@ -15,10 +15,16 @@ import (
 // break exactly one field and assert on that.
 func valid() config.Config {
 	return config.Config{
-		HTTPAddr:          ":8080",
-		LogLevel:          "info",
-		ReadHeaderTimeout: 10 * time.Second,
-		ShutdownTimeout:   15 * time.Second,
+		HTTPAddr:            ":8080",
+		LogLevel:            "info",
+		ReadHeaderTimeout:   10 * time.Second,
+		ShutdownTimeout:     15 * time.Second,
+		DBMaxConns:          10,
+		MigrateOnStart:      true,
+		KeyCacheTTL:         30 * time.Second,
+		BudgetCacheTTL:      15 * time.Second,
+		IdempotencyTTL:      24 * time.Hour,
+		RateLimitBurstRatio: 0.25,
 	}
 }
 
@@ -48,6 +54,16 @@ func TestConfigValidate(t *testing.T) {
 			name:    "zero read header timeout",
 			mutate:  func(c *config.Config) { c.ReadHeaderTimeout = 0 },
 			wantErr: "GATEWAY_READ_HEADER_TIMEOUT",
+		},
+		{
+			name:    "burst ratio above one",
+			mutate:  func(c *config.Config) { c.RateLimitBurstRatio = 1.5 },
+			wantErr: "GATEWAY_RATE_LIMIT_BURST_RATIO",
+		},
+		{
+			name:    "zero db connections",
+			mutate:  func(c *config.Config) { c.DBMaxConns = 0 },
+			wantErr: "GATEWAY_DB_MAX_CONNS",
 		},
 		{
 			name:    "negative shutdown timeout",
@@ -110,6 +126,14 @@ func TestLoadUsesDefaults(t *testing.T) {
 		"GATEWAY_LOG_LEVEL",
 		"GATEWAY_READ_HEADER_TIMEOUT",
 		"GATEWAY_SHUTDOWN_TIMEOUT",
+		"DATABASE_URL",
+		"GATEWAY_DB_MAX_CONNS",
+		"GATEWAY_MIGRATE_ON_START",
+		"GATEWAY_PRICING_FILE",
+		"GATEWAY_KEY_CACHE_TTL",
+		"GATEWAY_BUDGET_CACHE_TTL",
+		"GATEWAY_IDEMPOTENCY_TTL",
+		"GATEWAY_RATE_LIMIT_BURST_RATIO",
 	} {
 		if old, ok := os.LookupEnv(key); ok {
 			t.Cleanup(func() { _ = os.Setenv(key, old) })
@@ -120,6 +144,7 @@ func TestLoadUsesDefaults(t *testing.T) {
 	cfg, err := config.Load()
 	require.NoError(t, err)
 	require.Equal(t, valid(), cfg)
+	require.False(t, cfg.PersistenceEnabled())
 }
 
 func TestLoadRejectsBadValue(t *testing.T) {

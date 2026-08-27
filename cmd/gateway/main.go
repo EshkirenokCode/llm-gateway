@@ -16,9 +16,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/EshkirenokCode/llm-gateway/internal/auth"
+	"github.com/EshkirenokCode/llm-gateway/internal/billing"
 	"github.com/EshkirenokCode/llm-gateway/internal/config"
 	"github.com/EshkirenokCode/llm-gateway/internal/providers"
 	"github.com/EshkirenokCode/llm-gateway/internal/proxy"
+	"github.com/EshkirenokCode/llm-gateway/internal/storage"
 	"github.com/EshkirenokCode/llm-gateway/internal/telemetry"
 )
 
@@ -101,10 +104,48 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	provider := providers.NewMock(providers.MockOptions{})
-	metrics := telemetry.NewMetrics()
-	health := proxy.NewHealth(version, nil)
-	handler := proxy.NewHandler(provider, logger, metrics, health)
+	pricing := billing.DefaultPricing()
+	if cfg.PricingFile != "" {
+		pricing, err = billing.LoadPricing(cfg.PricingFile)
+		if err != nil {
+			return err
+		}
+		logger.Info("pricing loaded from file", "path", cfg.PricingFile)
+	}
+
+	opts := proxy.Options{
+		Provider:       providers.NewMock(providers.MockOptions{}),
+		Logger:         logger,
+		Metrics:        telemetry.NewMetrics(),
+		Pricing:        pricing,
+		IdempotencyTTL: cfg.IdempotencyTTL,
+	}
+
+	checks := map[string]proxy.ReadinessCheck{}
+
+	if cfg.PersistenceEnabled() {
+		store, err := openStore(ctx, cfg, logger)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+
+		limiter := billing.NewRateLimiter(cfg.RateLimitBurstRatio)
+
+		opts.Store = store
+		opts.Auth = auth.NewAuthenticator(store, cfg.KeyCacheTTL)
+		opts.Budget = billing.NewBudget(store, cfg.BudgetCacheTTL)
+		opts.Limiter = limiter
+
+		checks["database"] = store.Ping
+
+		go housekeeping(ctx, store, limiter, logger)
+	} else {
+		logger.Warn("running without a database: no tenants, accounting or budgets")
+	}
+
+	opts.Health = proxy.NewHealth(version, checks)
+	handler := proxy.NewHandler(opts)
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -116,7 +157,11 @@ func run() error {
 	// startup failure back over a buffered channel.
 	serveErr := make(chan error, 1)
 	go func() {
-		logger.Info("http server listening", "addr", cfg.HTTPAddr, "version", version, "provider", provider.Name())
+		logger.Info("http server listening",
+			"addr", cfg.HTTPAddr,
+			"version", version,
+			"provider", opts.Provider.Name(),
+			"persistence", cfg.PersistenceEnabled())
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serveErr <- err
 			return
@@ -136,7 +181,7 @@ func run() error {
 
 	// Fail readiness first so a load balancer stops sending new requests while
 	// the in-flight ones drain.
-	health.BeginShutdown()
+	opts.Health.BeginShutdown()
 
 	// ctx is already cancelled here, so the shutdown deadline needs a fresh
 	// parent context of its own.
@@ -150,4 +195,52 @@ func run() error {
 	logger.Info("shutdown complete")
 
 	return nil
+}
+
+func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (*storage.Store, error) {
+	connectCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	store, err := storage.Open(connectCtx, cfg.DatabaseURL, cfg.DBMaxConns)
+	if err != nil {
+		return nil, err
+	}
+
+	if cfg.MigrateOnStart {
+		migrateCtx, cancelMigrate := context.WithTimeout(ctx, time.Minute)
+		defer cancelMigrate()
+
+		if err := storage.Migrate(migrateCtx, store.Pool); err != nil {
+			store.Close()
+			return nil, err
+		}
+		logger.Info("migrations applied")
+	}
+
+	return store, nil
+}
+
+// housekeeping drops rate limiter buckets and idempotency rows that nobody
+// will look at again. Both grow without bound otherwise.
+func housekeeping(ctx context.Context, store *storage.Store, limiter *billing.RateLimiter, logger *slog.Logger) {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			limiter.Sweep(time.Hour)
+
+			removed, err := store.DeleteExpiredIdempotencyKeys(ctx)
+			if err != nil {
+				logger.Warn("could not clean up idempotency keys", "error", err)
+				continue
+			}
+			if removed > 0 {
+				logger.Info("expired idempotency keys removed", "count", removed)
+			}
+		}
+	}
 }

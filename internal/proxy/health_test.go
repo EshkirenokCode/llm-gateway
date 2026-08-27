@@ -29,8 +29,11 @@ func TestLivenessAlwaysOK(t *testing.T) {
 	failing := map[string]proxy.ReadinessCheck{
 		"database": func(context.Context) error { return errors.New("connection refused") },
 	}
-	h := proxy.NewHandler(providers.NewMock(providers.MockOptions{}), discardLogger(t),
-		telemetry.NewMetrics(), proxy.NewHealth("test", failing)).Routes()
+	h := proxy.NewHandler(proxy.Options{
+		Provider: providers.NewMock(providers.MockOptions{}),
+		Logger:   discardLogger(t),
+		Health:   proxy.NewHealth("test", failing),
+	}).Routes()
 
 	rec := get(t, h, "/healthz")
 
@@ -44,8 +47,11 @@ func TestReadinessReflectsChecks(t *testing.T) {
 		"database": func(context.Context) error { return errors.New("connection refused") },
 		"cache":    func(context.Context) error { return nil },
 	}
-	h := proxy.NewHandler(providers.NewMock(providers.MockOptions{}), discardLogger(t),
-		telemetry.NewMetrics(), proxy.NewHealth("test", checks)).Routes()
+	h := proxy.NewHandler(proxy.Options{
+		Provider: providers.NewMock(providers.MockOptions{}),
+		Logger:   discardLogger(t),
+		Health:   proxy.NewHealth("test", checks),
+	}).Routes()
 
 	rec := get(t, h, "/readyz")
 
@@ -65,8 +71,11 @@ func TestReadinessFailsWhileShuttingDown(t *testing.T) {
 	t.Parallel()
 
 	health := proxy.NewHealth("test", nil)
-	h := proxy.NewHandler(providers.NewMock(providers.MockOptions{}), discardLogger(t),
-		telemetry.NewMetrics(), health).Routes()
+	h := proxy.NewHandler(proxy.Options{
+		Provider: providers.NewMock(providers.MockOptions{}),
+		Logger:   discardLogger(t),
+		Health:   health,
+	}).Routes()
 
 	require.Equal(t, http.StatusOK, get(t, h, "/readyz").Code)
 
@@ -81,8 +90,12 @@ func TestMetricsExposeGatewayCollectors(t *testing.T) {
 	t.Parallel()
 
 	metrics := telemetry.NewMetrics()
-	h := proxy.NewHandler(providers.NewMock(providers.MockOptions{Reply: "hi there"}), discardLogger(t),
-		metrics, proxy.NewHealth("test", nil)).Routes()
+	h := proxy.NewHandler(proxy.Options{
+		Provider: providers.NewMock(providers.MockOptions{Reply: "hi there"}),
+		Logger:   discardLogger(t),
+		Metrics:  metrics,
+		Health:   proxy.NewHealth("test", nil),
+	}).Routes()
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		strings.NewReader(`{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}`))

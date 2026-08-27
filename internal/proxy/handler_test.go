@@ -25,7 +25,7 @@ func discardLogger(t *testing.T) *slog.Logger {
 
 func testHandler(t *testing.T, p providers.Provider) http.Handler {
 	t.Helper()
-	return proxy.NewHandler(p, discardLogger(t), nil, nil).Routes()
+	return proxy.NewHandler(proxy.Options{Provider: p, Logger: discardLogger(t)}).Routes()
 }
 
 func post(t *testing.T, h http.Handler, body string) *httptest.ResponseRecorder {
