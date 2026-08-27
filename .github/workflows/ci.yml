@@ -23,7 +23,9 @@ jobs:
         run: go vet ./...
 
       - name: Test
-        run: go test -race -count=1 ./...
+        # The integration tests start Postgres with testcontainers; the runner
+        # already has docker.
+        run: go test -race -count=1 -timeout 15m ./...
 
   lint:
     runs-on: ubuntu-latest
