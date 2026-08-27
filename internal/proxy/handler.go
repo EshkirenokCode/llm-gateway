@@ -8,10 +8,13 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/EshkirenokCode/llm-gateway/internal/providers"
+	"github.com/EshkirenokCode/llm-gateway/internal/telemetry"
 )
 
 // maxRequestBody caps the request body. Prompts are text, so a megabyte is
@@ -22,17 +25,35 @@ const maxRequestBody = 1 << 20
 type Handler struct {
 	provider providers.Provider
 	logger   *slog.Logger
+	metrics  *telemetry.Metrics
+	health   *Health
 }
 
 // NewHandler returns a Handler backed by the given provider.
-func NewHandler(provider providers.Provider, logger *slog.Logger) *Handler {
-	return &Handler{provider: provider, logger: logger}
+func NewHandler(provider providers.Provider, logger *slog.Logger, metrics *telemetry.Metrics, health *Health) *Handler {
+	if metrics == nil {
+		metrics = telemetry.NewMetrics()
+	}
+	if health == nil {
+		health = NewHealth("dev", nil)
+	}
+	return &Handler{provider: provider, logger: logger, metrics: metrics, health: health}
 }
 
-// Routes returns the router with the gateway's public endpoints mounted.
+// Routes returns the router with the gateway's endpoints mounted. Probes and
+// metrics are not instrumented: they would drown the real traffic in noise.
 func (h *Handler) Routes() http.Handler {
 	r := chi.NewRouter()
-	r.Post("/v1/chat/completions", h.chatCompletions)
+
+	r.Group(func(r chi.Router) {
+		r.Use(h.metrics.Middleware("/v1/chat/completions"))
+		r.Post("/v1/chat/completions", h.chatCompletions)
+	})
+
+	r.Get("/healthz", h.health.Live)
+	r.Get("/readyz", h.health.Ready)
+	r.Handle("/metrics", promhttp.HandlerFor(h.metrics.Registry(), promhttp.HandlerOpts{}))
+
 	return r
 }
 
@@ -48,8 +69,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	start := time.Now()
 	resp, err := h.provider.Chat(r.Context(), req)
+	upstream := time.Since(start)
 	if err != nil {
+		h.metrics.ObserveUpstream(h.provider.Name(), "error", upstream)
 		// A cancelled context means the client hung up; nobody is left to read
 		// a response, so only record it.
 		if errors.Is(err, r.Context().Err()) && r.Context().Err() != nil {
@@ -61,6 +85,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "api_error", "upstream provider failed")
 		return
 	}
+
+	h.metrics.ObserveUpstream(h.provider.Name(), "success", upstream)
+	h.metrics.ObserveTokens(h.provider.Name(), resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+	h.metrics.ObserveOverhead(time.Since(start), upstream)
 
 	writeJSON(w, http.StatusOK, resp)
 }

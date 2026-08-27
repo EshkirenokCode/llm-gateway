@@ -18,10 +18,14 @@ import (
 	"github.com/EshkirenokCode/llm-gateway/internal/proxy"
 )
 
+func discardLogger(t *testing.T) *slog.Logger {
+	t.Helper()
+	return slog.New(slog.NewJSONHandler(io.Discard, nil))
+}
+
 func testHandler(t *testing.T, p providers.Provider) http.Handler {
 	t.Helper()
-	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	return proxy.NewHandler(p, logger).Routes()
+	return proxy.NewHandler(p, discardLogger(t), nil, nil).Routes()
 }
 
 func post(t *testing.T, h http.Handler, body string) *httptest.ResponseRecorder {

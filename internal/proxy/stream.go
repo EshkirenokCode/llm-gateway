@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/EshkirenokCode/llm-gateway/internal/providers"
 )
@@ -54,6 +55,7 @@ func (h *Handler) streamCompletions(w http.ResponseWriter, r *http.Request, req 
 		if ctx.Err() != nil {
 			return
 		}
+		h.metrics.ObserveStream(h.provider.Name(), "start_failed")
 		h.logger.Error("upstream stream failed to start", "provider", h.provider.Name(), "error", err)
 		writeError(w, http.StatusBadGateway, "api_error", "upstream provider failed")
 		return
@@ -69,6 +71,7 @@ func (h *Handler) streamCompletions(w http.ResponseWriter, r *http.Request, req 
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
+	start := time.Now()
 	first := true
 	for {
 		chunk, err := stream.Recv()
@@ -78,9 +81,11 @@ func (h *Handler) streamCompletions(w http.ResponseWriter, r *http.Request, req 
 		if err != nil {
 			if ctx.Err() != nil {
 				h.logger.Info("client disconnected mid-stream", "provider", h.provider.Name())
+				h.metrics.ObserveStream(h.provider.Name(), "client_gone")
 				return
 			}
 			h.logger.Error("stream aborted", "provider", h.provider.Name(), "error", err)
+			h.metrics.ObserveStream(h.provider.Name(), "error")
 			return
 		}
 
@@ -104,6 +109,7 @@ func (h *Handler) streamCompletions(w http.ResponseWriter, r *http.Request, req 
 		}
 
 		if chunk.Usage != nil {
+			h.metrics.ObserveTokens(h.provider.Name(), stream.Model(), chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens)
 			event.Usage = &streamUsage{
 				PromptTokens:     chunk.Usage.PromptTokens,
 				CompletionTokens: chunk.Usage.CompletionTokens,
@@ -113,10 +119,14 @@ func (h *Handler) streamCompletions(w http.ResponseWriter, r *http.Request, req 
 
 		if err := writeEvent(w, event); err != nil {
 			h.logger.Info("stopped writing to client", "error", err)
+			h.metrics.ObserveStream(h.provider.Name(), "write_failed")
 			return
 		}
 		flusher.Flush()
 	}
+
+	h.metrics.ObserveUpstream(h.provider.Name(), "success", time.Since(start))
+	h.metrics.ObserveStream(h.provider.Name(), "completed")
 
 	// The sentinel tells OpenAI clients the stream ended normally.
 	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
