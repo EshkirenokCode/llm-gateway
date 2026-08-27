@@ -1,0 +1,119 @@
+package providers
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"strings"
+	"time"
+)
+
+// MockOptions tunes the behaviour of a Mock provider in tests and local runs.
+type MockOptions struct {
+	// Latency delays every call, simulating a slow upstream.
+	Latency time.Duration
+	// Err, when set, is returned instead of a completion.
+	Err error
+	// Reply overrides the generated answer.
+	Reply string
+}
+
+// Mock is a provider that answers locally, without network access or cost. It
+// backs the local docker compose stack and every test that needs a predictable
+// upstream.
+type Mock struct {
+	opts MockOptions
+	now  func() time.Time
+}
+
+// NewMock returns a Mock provider.
+func NewMock(opts MockOptions) *Mock {
+	return &Mock{opts: opts, now: time.Now}
+}
+
+// Name implements Provider.
+func (m *Mock) Name() string { return "mock" }
+
+// Chat implements Provider. It echoes the last user message unless a reply is
+// configured, and reports token counts estimated from the text length.
+func (m *Mock) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	if m.opts.Latency > 0 {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(m.opts.Latency):
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	if m.opts.Err != nil {
+		return nil, m.opts.Err
+	}
+
+	prompt := lastUserMessage(req.Messages)
+
+	reply := m.opts.Reply
+	if reply == "" {
+		reply = "mock response to: " + prompt
+	}
+
+	promptTokens := 0
+	for _, msg := range req.Messages {
+		promptTokens += estimateTokens(msg.Content)
+	}
+	completionTokens := estimateTokens(reply)
+
+	return &ChatResponse{
+		ID:      "chatcmpl-" + randomID(),
+		Object:  "chat.completion",
+		Created: m.now().Unix(),
+		Model:   req.Model,
+		Choices: []Choice{{
+			Index:        0,
+			Message:      Message{Role: "assistant", Content: reply},
+			FinishReason: "stop",
+		}},
+		Usage: Usage{
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			TotalTokens:      promptTokens + completionTokens,
+		},
+	}, nil
+}
+
+func lastUserMessage(messages []Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			return messages[i].Content
+		}
+	}
+	return ""
+}
+
+// estimateTokens is a rough stand-in for a real tokenizer: roughly one token
+// per four characters. Good enough for a fake upstream, and deliberately not
+// used for billing real providers, which report their own counts.
+func estimateTokens(s string) int {
+	fields := len(strings.Fields(s))
+	if fields == 0 {
+		return 0
+	}
+	if n := len(s) / 4; n > fields {
+		return n
+	}
+	return fields
+}
+
+func randomID() string {
+	var b [12]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand only fails if the system entropy source is broken; a
+		// timestamp keeps the response usable instead of failing the request.
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
+}

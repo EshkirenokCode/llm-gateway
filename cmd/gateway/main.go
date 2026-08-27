@@ -14,6 +14,8 @@ import (
 	"syscall"
 
 	"github.com/EshkirenokCode/llm-gateway/internal/config"
+	"github.com/EshkirenokCode/llm-gateway/internal/providers"
+	"github.com/EshkirenokCode/llm-gateway/internal/proxy"
 )
 
 // version is overridden at build time via -ldflags.
@@ -49,11 +51,12 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	mux := http.NewServeMux()
+	provider := providers.NewMock(providers.MockOptions{})
+	handler := proxy.NewHandler(provider, logger)
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           mux,
+		Handler:           handler.Routes(),
 		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
 	}
 
@@ -61,7 +64,7 @@ func run() error {
 	// startup failure back over a buffered channel.
 	serveErr := make(chan error, 1)
 	go func() {
-		logger.Info("http server listening", "addr", cfg.HTTPAddr, "version", version)
+		logger.Info("http server listening", "addr", cfg.HTTPAddr, "version", version, "provider", provider.Name())
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serveErr <- err
 			return
