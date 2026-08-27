@@ -7,6 +7,13 @@
 .env
 *.pem
 
+# local tooling
+CLAUDE.md
+AGENTS.md
+.claude/
+.idea/
+.vscode/
+
 # test and tooling output
 coverage.out
 dist/
