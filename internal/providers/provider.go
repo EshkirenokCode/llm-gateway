@@ -60,4 +60,7 @@ type Provider interface {
 	// honour ctx cancellation and must not retry internally; retry and
 	// failover are the caller's responsibility.
 	Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error)
+	// ChatStream starts a streamed completion. Cancelling ctx must abort the
+	// upstream call so the gateway stops paying for tokens nobody reads.
+	ChatStream(ctx context.Context, req ChatRequest) (ChatStream, error)
 }

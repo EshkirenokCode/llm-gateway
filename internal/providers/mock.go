@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 )
@@ -116,4 +117,99 @@ func randomID() string {
 		return fmt.Sprintf("%d", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(b[:])
+}
+
+// mockStream replays a prepared answer word by word.
+type mockStream struct {
+	id      string
+	model   string
+	created int64
+
+	ctx    context.Context
+	words  []string
+	pos    int
+	delay  time.Duration
+	usage  *Usage
+	closed bool
+}
+
+// ChatStream implements Provider. The reply is split into words so a client
+// sees the same incremental behaviour as with a real model.
+func (m *Mock) ChatStream(ctx context.Context, req ChatRequest) (ChatStream, error) {
+	if m.opts.Err != nil {
+		return nil, m.opts.Err
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	reply := m.opts.Reply
+	if reply == "" {
+		reply = "mock response to: " + lastUserMessage(req.Messages)
+	}
+
+	promptTokens := 0
+	for _, msg := range req.Messages {
+		promptTokens += estimateTokens(msg.Content)
+	}
+
+	return &mockStream{
+		id:      "chatcmpl-" + randomID(),
+		model:   req.Model,
+		created: m.now().Unix(),
+		ctx:     ctx,
+		words:   strings.Fields(reply),
+		delay:   m.opts.Latency,
+		usage: &Usage{
+			PromptTokens:     promptTokens,
+			CompletionTokens: estimateTokens(reply),
+			TotalTokens:      promptTokens + estimateTokens(reply),
+		},
+	}, nil
+}
+
+func (s *mockStream) ID() string     { return s.id }
+func (s *mockStream) Model() string  { return s.model }
+func (s *mockStream) Created() int64 { return s.created }
+
+func (s *mockStream) Recv() (Chunk, error) {
+	if s.closed {
+		return Chunk{}, io.EOF
+	}
+
+	if s.delay > 0 {
+		select {
+		case <-s.ctx.Done():
+			return Chunk{}, s.ctx.Err()
+		case <-time.After(s.delay):
+		}
+	}
+
+	if err := s.ctx.Err(); err != nil {
+		return Chunk{}, err
+	}
+
+	// All words sent: emit the closing chunk once, then report EOF.
+	if s.pos >= len(s.words) {
+		if s.usage == nil {
+			return Chunk{}, io.EOF
+		}
+		usage := s.usage
+		s.usage = nil
+		return Chunk{FinishReason: "stop", Usage: usage}, nil
+	}
+
+	word := s.words[s.pos]
+	s.pos++
+	if s.pos > 1 {
+		word = " " + word
+	}
+
+	return Chunk{Delta: word}, nil
+}
+
+func (s *mockStream) Close() error {
+	s.closed = true
+	return nil
 }

@@ -122,16 +122,6 @@ func TestChatCompletionsRejectsBadRequests(t *testing.T) {
 	}
 }
 
-func TestChatCompletionsStreamNotImplemented(t *testing.T) {
-	t.Parallel()
-
-	h := testHandler(t, providers.NewMock(providers.MockOptions{}))
-
-	rec := post(t, h, `{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"stream":true}`)
-
-	require.Equal(t, http.StatusNotImplemented, rec.Code)
-}
-
 func TestChatCompletionsUpstreamFailure(t *testing.T) {
 	t.Parallel()
 

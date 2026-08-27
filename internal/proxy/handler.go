@@ -44,7 +44,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Stream {
-		writeError(w, http.StatusNotImplemented, "invalid_request_error", "streaming is not supported yet")
+		h.streamCompletions(w, r, req)
 		return
 	}
 
