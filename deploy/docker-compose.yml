@@ -1,0 +1,51 @@
+name: llm-gateway
+
+services:
+  gateway:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      GATEWAY_HTTP_ADDR: ":8080"
+      GATEWAY_LOG_LEVEL: "info"
+    ports:
+      - "8080:8080"
+    healthcheck:
+      # The image has no shell, so the probe runs the binary's own check.
+      test: ["CMD", "/gateway", "-healthcheck"]
+      interval: 10s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - gateway
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  grafana-data:

@@ -1,0 +1,85 @@
+{
+  "title": "LLM Gateway",
+  "uid": "llm-gateway",
+  "timezone": "browser",
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Requests per second",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(gateway_http_requests_total[1m]))",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Request latency",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(gateway_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(gateway_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(gateway_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Gateway overhead",
+      "description": "Request duration minus the time spent waiting for the provider.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(gateway_overhead_seconds_bucket[5m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(gateway_overhead_seconds_bucket[5m])))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Tokens per second",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum by (kind) (rate(gateway_tokens_total[1m]))",
+          "legendFormat": "{{kind}}"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "In flight",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 16 },
+      "targets": [{ "expr": "gateway_http_requests_in_flight" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Stream outcomes",
+      "gridPos": { "h": 6, "w": 18, "x": 6, "y": 16 },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(gateway_streams_total[5m]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    }
+  ]
+}
