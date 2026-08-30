@@ -2,8 +2,12 @@ name: ci
 
 on:
   push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
+
+# A new push to the same branch makes the previous run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
