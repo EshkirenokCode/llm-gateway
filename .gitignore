@@ -8,9 +8,6 @@
 *.pem
 
 # local tooling
-CLAUDE.md
-AGENTS.md
-.claude/
 .idea/
 .vscode/
 

@@ -38,7 +38,7 @@ func TestStreamSendsChunksAndDone(t *testing.T) {
 
 	h := testHandler(t, providers.NewMock(providers.MockOptions{Reply: "one two three"}))
 
-	rec := post(t, h, `{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+	rec := post(t, h, `{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":true}}`)
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "text/event-stream", rec.Header().Get("Content-Type"))
@@ -77,6 +77,11 @@ func TestStreamSendsChunksAndDone(t *testing.T) {
 		require.Equal(t, "chat.completion.chunk", chunk.Object)
 		require.Equal(t, "gpt-4o-mini", chunk.Model)
 		require.NotEmpty(t, chunk.ID)
+		if chunk.Usage != nil {
+			usage = chunk.Usage
+			require.Empty(t, chunk.Choices)
+			continue
+		}
 		require.Len(t, chunk.Choices, 1)
 
 		if i == 0 {

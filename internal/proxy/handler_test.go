@@ -171,7 +171,7 @@ func TestUnknownRoute(t *testing.T) {
 
 	h := testHandler(t, providers.NewMock(providers.MockOptions{}))
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/missing", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 

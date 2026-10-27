@@ -29,7 +29,7 @@ func NewMetrics() *Metrics {
 		registry: prometheus.NewRegistry(),
 		requests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "gateway_http_requests_total",
-			Help: "HTTP requests handled, by route, method and status class.",
+			Help: "HTTP requests handled, by route, method and status code.",
 		}, []string{"route", "method", "status"}),
 		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "gateway_http_request_duration_seconds",
@@ -100,12 +100,24 @@ func (m *Metrics) ObserveOverhead(total, upstream time.Duration) {
 // expose after the fact.
 type statusRecorder struct {
 	http.ResponseWriter
-	status int
+	status      int
+	wroteHeader bool
 }
 
 func (r *statusRecorder) WriteHeader(code int) {
+	if r.wroteHeader {
+		return
+	}
+	r.wroteHeader = true
 	r.status = code
 	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Write(p []byte) (int, error) {
+	if !r.wroteHeader {
+		r.WriteHeader(http.StatusOK)
+	}
+	return r.ResponseWriter.Write(p)
 }
 
 // Unwrap lets http.ResponseController reach the underlying writer, keeping
@@ -113,6 +125,9 @@ func (r *statusRecorder) WriteHeader(code int) {
 func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
 func (r *statusRecorder) Flush() {
+	if !r.wroteHeader {
+		r.WriteHeader(http.StatusOK)
+	}
 	if f, ok := r.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}

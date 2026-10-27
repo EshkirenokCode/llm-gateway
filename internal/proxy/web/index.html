@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>LLM Gateway · Playground</title>
+    <link rel="stylesheet" href="/assets/style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <span class="mark" aria-hidden="true">↗</span>llm-gateway
+      </div>
+      <div class="header-right">
+        <span class="badge offline" id="health"
+          ><span class="dot"></span
+          ><span id="health-label">Checking health</span></span
+        ><a
+          href="https://github.com/EshkirenokCode/llm-gateway"
+          target="_blank"
+          rel="noopener noreferrer"
+          >Source code ↗</a
+        >
+      </div>
+    </header>
+    <main>
+      <div class="intro">
+        <div>
+          <div class="eyebrow">One endpoint. Your infrastructure.</div>
+          <h1>A clearer route to models.</h1>
+          <p>
+            A small gateway with the essentials in place. Send a request, watch
+            the stream, and inspect what came back.
+          </p>
+          <p class="hint mode-note">
+            {{if eq .Provider "mock"}}Local demo · echoes your prompt · no
+            external calls{{else}}Live upstream · provider charges may
+            apply{{end}}
+          </p>
+        </div>
+        <div class="edition">
+          GATEWAY PLAYGROUND / 01<br />GO · HTTP · SERVER-SENT EVENTS
+        </div>
+      </div>
+      <div class="workspace">
+        <aside>
+          <p class="section-label">Request settings</p>
+          <div class="field">
+            <label for="model">Model</label
+            ><select id="model">
+              {{range .Models}}
+              <option>{{.}}</option>
+              {{end}}
+            </select>
+            <p class="hint">Models enabled by this gateway.</p>
+          </div>
+          <div class="field">
+            <label for="key"
+              >Gateway key {{if not .Protected}}<span class="tag">OPTIONAL</span
+              >{{end}}</label
+            ><input
+              id="key"
+              type="password"
+              autocomplete="off"
+              placeholder="{{if .Protected}}Enter your tenant key{{else}}Not required in this demo{{end}}"
+            />
+            <p class="hint">Kept in memory for this page only.</p>
+          </div>
+          <div class="field">
+            <label for="tokens">Max output tokens</label
+            ><input id="tokens" type="number" min="1" max="32768" value="256" />
+          </div>
+          <div class="switch">
+            <label for="stream">Stream response</label
+            ><input id="stream" type="checkbox" checked />
+          </div>
+          <div class="route">
+            <p class="section-label route-label">Request route</p>
+            <code
+              ><span class="method">POST</span><br />/v1/chat/completions</code
+            >
+            <p class="hint">Provider: <strong>{{.Provider}}</strong></p>
+            {{if eq .Provider "mock"}}
+            <p class="hint key-note">
+              Local demo · replies echo your prompt.<br />No external calls or
+              charges.
+            </p>
+            {{else}}
+            <p class="hint key-note">
+              Live upstream · provider charges may apply.
+            </p>
+            {{end}}
+          </div>
+        </aside>
+        <section class="conversation" aria-label="Chat playground">
+          <div class="toolbar">
+            <span>Playground <span class="tag">CHAT COMPLETIONS</span></span
+            ><button class="quiet" id="clear">Clear conversation ↺</button>
+          </div>
+          <div class="messages" id="messages" role="log" aria-live="polite">
+            <div class="empty" id="empty">
+              <div class="empty-icon" aria-hidden="true">[ ↗ ]</div>
+              <h2>Make your first request.</h2>
+              <p>
+                Your model response will appear here.<br />Start with a prompt
+                below.
+              </p>
+              <div class="suggestions">
+                <button
+                  data-prompt="Explain how an API gateway works in three sentences."
+                >
+                  Explain API gateways ↗</button
+                ><button
+                  data-prompt="Write a short health-check checklist for a Go service."
+                >
+                  A service checklist ↗
+                </button>
+              </div>
+            </div>
+          </div>
+          <form class="composer" id="form">
+            <label for="prompt" class="section-label prompt-label"
+              >Your message</label
+            ><textarea
+              id="prompt"
+              required
+              maxlength="50000"
+              placeholder="What would you like to ask?"
+            ></textarea>
+            <div class="composer-bottom">
+              <small>Enter to send · Shift + Enter for a new line</small>
+              <div>
+                <button type="button" id="stop" class="stop" hidden>
+                  Stop
+                </button>
+                <button class="send" id="send" type="submit">
+                  Send request ↗
+                </button>
+              </div>
+            </div>
+          </form>
+        </section>
+      </div>
+      <div class="stats" aria-label="Last request statistics">
+        <div class="stat">
+          <div class="label">Round-trip time</div>
+          <div class="value" id="latency">— <small>ms</small></div>
+        </div>
+        <div class="stat">
+          <div class="label">First token</div>
+          <div class="value" id="ttft">— <small>ms</small></div>
+        </div>
+        <div class="stat">
+          <div class="label">Total tokens</div>
+          <div class="value" id="usage">—</div>
+        </div>
+        <div class="stat">
+          <div class="label">HTTP status</div>
+          <div class="value" id="http-status">—</div>
+        </div>
+      </div>
+      <footer>
+        <span id="status-text" role="status">Ready when you are.</span
+        ><span>Keys and conversation are never saved by this page.</span>
+      </footer>
+    </main>
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>

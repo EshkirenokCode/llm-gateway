@@ -2,12 +2,15 @@
 package proxy
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -27,6 +30,7 @@ type Handler struct {
 	logger   *slog.Logger
 	metrics  *telemetry.Metrics
 	health   *Health
+	access   *access
 }
 
 // NewHandler returns a Handler backed by the given provider.
@@ -45,22 +49,45 @@ func NewHandler(provider providers.Provider, logger *slog.Logger, metrics *telem
 func (h *Handler) Routes() http.Handler {
 	r := chi.NewRouter()
 
-	r.Group(func(r chi.Router) {
-		r.Use(h.metrics.Middleware("/v1/chat/completions"))
-		r.Post("/v1/chat/completions", h.chatCompletions)
-	})
+	r.With(h.metrics.Middleware("/v1/models"), h.guard).Get("/v1/models", h.models)
+	r.With(h.metrics.Middleware("/v1/chat/completions"), h.guard).Post("/v1/chat/completions", h.chatCompletions)
 
 	r.Get("/healthz", h.health.Live)
 	r.Get("/readyz", h.health.Ready)
-	r.Handle("/metrics", promhttp.HandlerFor(h.metrics.Registry(), promhttp.HandlerOpts{}))
+	r.Handle("/metrics", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h.access != nil && h.access.metricsKey != "" {
+			got := sha256.Sum256([]byte(r.Header.Get("Authorization")))
+			want := sha256.Sum256([]byte("Bearer " + h.access.metricsKey))
+			if subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
+				writeError(w, 401, "authentication_error", "valid metrics token required")
+				return
+			}
+		}
+		promhttp.HandlerFor(h.metrics.Registry(), promhttp.HandlerOpts{}).ServeHTTP(w, r)
+	}))
+	r.Get("/", h.playground)
+	r.Get("/assets/style.css", staticAsset(playgroundCSS, "text/css; charset=utf-8"))
+	r.Get("/assets/app.js", staticAsset(playgroundJS, "text/javascript; charset=utf-8"))
+	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
+		writeError(w, 404, "invalid_request_error", "route not found")
+	})
+	r.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
+		writeError(w, 405, "invalid_request_error", "method not allowed")
+	})
 
 	return r
 }
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
+	totalStart := time.Now()
 	req, err := decodeChatRequest(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+
+	if err := h.validateModel(req.Model); err != nil {
+		writeError(w, 400, "invalid_request_error", err.Error())
 		return
 	}
 
@@ -74,23 +101,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	upstream := time.Since(start)
 	if err != nil {
 		h.metrics.ObserveUpstream(h.provider.Name(), "error", upstream)
-		// A cancelled context means the client hung up; nobody is left to read
-		// a response, so only record it.
-		if errors.Is(err, r.Context().Err()) && r.Context().Err() != nil {
-			h.logger.Info("client disconnected", "path", r.URL.Path)
-			return
-		}
-
-		h.logger.Error("upstream call failed", "provider", h.provider.Name(), "error", err)
-		writeError(w, http.StatusBadGateway, "api_error", "upstream provider failed")
+		h.providerError(w, r, err)
 		return
 	}
 
 	h.metrics.ObserveUpstream(h.provider.Name(), "success", upstream)
-	h.metrics.ObserveTokens(h.provider.Name(), resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
-	h.metrics.ObserveOverhead(time.Since(start), upstream)
-
+	h.metrics.ObserveTokens(h.provider.Name(), req.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 	writeJSON(w, http.StatusOK, resp)
+	h.metrics.ObserveOverhead(time.Since(totalStart), upstream)
 }
 
 func decodeChatRequest(r *http.Request) (providers.ChatRequest, error) {
@@ -119,7 +137,7 @@ func decodeChatRequest(r *http.Request) (providers.ChatRequest, error) {
 }
 
 func validate(req providers.ChatRequest) error {
-	if req.Model == "" {
+	if strings.TrimSpace(req.Model) == "" {
 		return fmt.Errorf("model is required")
 	}
 	if len(req.Messages) == 0 {
@@ -131,6 +149,9 @@ func validate(req providers.ChatRequest) error {
 		default:
 			return fmt.Errorf("messages[%d].role must be system, user or assistant", i)
 		}
+	}
+	if req.StreamOptions != nil && !req.Stream {
+		return fmt.Errorf("stream_options requires stream=true")
 	}
 	if req.MaxTokens < 0 {
 		return fmt.Errorf("max_tokens must not be negative")

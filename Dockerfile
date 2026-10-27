@@ -5,7 +5,7 @@ WORKDIR /src
 
 # Copy manifests first so dependency download is cached independently
 # of source changes.
-COPY go.mod ./
+COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .

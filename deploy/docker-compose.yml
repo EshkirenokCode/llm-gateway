@@ -9,7 +9,7 @@ services:
       GATEWAY_HTTP_ADDR: ":8080"
       GATEWAY_LOG_LEVEL: "info"
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     healthcheck:
       # The image has no shell, so the probe runs the binary's own check.
       test: ["CMD", "/gateway", "-healthcheck"]
@@ -25,7 +25,7 @@ services:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     depends_on:
       - gateway
     restart: unless-stopped
@@ -41,7 +41,7 @@ services:
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     depends_on:
       - prometheus
     restart: unless-stopped

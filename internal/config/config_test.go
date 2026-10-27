@@ -15,7 +15,8 @@ import (
 // break exactly one field and assert on that.
 func valid() config.Config {
 	return config.Config{
-		HTTPAddr:          ":8080",
+		HTTPAddr: ":8080",
+		Provider: "mock", RequestTimeout: 60 * time.Second, Models: []string{"demo-model"},
 		LogLevel:          "info",
 		ReadHeaderTimeout: 10 * time.Second,
 		ShutdownTimeout:   15 * time.Second,
@@ -106,6 +107,7 @@ func TestLoadUsesDefaults(t *testing.T) {
 	// No t.Parallel: unsetting environment variables mutates process-wide state.
 	// t.Setenv cannot unset, so restore the previous values by hand.
 	for _, key := range []string{
+		"GATEWAY_PROVIDER", "GATEWAY_UPSTREAM_URL", "GATEWAY_UPSTREAM_KEY", "GATEWAY_REQUEST_TIMEOUT", "GATEWAY_MODELS", "GATEWAY_TENANTS", "GATEWAY_METRICS_KEY",
 		"GATEWAY_HTTP_ADDR",
 		"GATEWAY_LOG_LEVEL",
 		"GATEWAY_READ_HEADER_TIMEOUT",
@@ -127,4 +129,37 @@ func TestLoadRejectsBadValue(t *testing.T) {
 
 	_, err := config.Load()
 	require.ErrorContains(t, err, "GATEWAY_LOG_LEVEL")
+}
+
+func TestCompatibleConfiguration(t *testing.T) {
+	cfg := valid()
+	cfg.Provider = "compatible"
+	cfg.UpstreamURL = "http://localhost:11434/v1"
+	cfg.TenantsJSON = `[{"name":"app","key":"example-key-with-at-least-24-characters","rpm":60,"concurrency":4}]`
+	require.NoError(t, cfg.Validate())
+	for _, tc := range []struct {
+		name   string
+		mutate func(*config.Config)
+	}{
+		{"missing tenant", func(c *config.Config) { c.TenantsJSON = "" }},
+		{"short key", func(c *config.Config) { c.TenantsJSON = `[{"name":"app","key":"short","rpm":1,"concurrency":1}]` }},
+		{"credential in URL", func(c *config.Config) { c.UpstreamURL = "https://user:password@example.com/v1" }},
+		{"invalid scheme", func(c *config.Config) { c.UpstreamURL = "file:///etc/passwd" }},
+		{"query in URL", func(c *config.Config) { c.UpstreamURL = "https://example.com/v1?key=secret" }},
+		{"unknown tenant field", func(c *config.Config) { c.TenantsJSON = `[{"password":"do-not-expose"}]` }},
+		{"extra JSON", func(c *config.Config) { c.TenantsJSON += "{}" }},
+		{"duplicate model", func(c *config.Config) { c.Models = []string{"m", "m"} }},
+		{"empty model", func(c *config.Config) { c.Models = []string{""} }},
+		{"invalid provider", func(c *config.Config) { c.Provider = "unknown" }},
+		{"zero timeout", func(c *config.Config) { c.RequestTimeout = 0 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bad := cfg
+			tc.mutate(&bad)
+			err := bad.Validate()
+			require.Error(t, err)
+			require.NotContains(t, err.Error(), "password")
+			require.NotContains(t, err.Error(), "do-not-expose")
+		})
+	}
 }

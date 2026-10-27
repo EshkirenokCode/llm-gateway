@@ -62,6 +62,8 @@ func (m *Mock) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error)
 		reply = "mock response to: " + prompt
 	}
 
+	reply, finish := limitReply(reply, req.MaxTokens)
+
 	promptTokens := 0
 	for _, msg := range req.Messages {
 		promptTokens += estimateTokens(msg.Content)
@@ -76,7 +78,7 @@ func (m *Mock) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error)
 		Choices: []Choice{{
 			Index:        0,
 			Message:      Message{Role: "assistant", Content: reply},
-			FinishReason: "stop",
+			FinishReason: finish,
 		}},
 		Usage: Usage{
 			PromptTokens:     promptTokens,
@@ -131,6 +133,7 @@ type mockStream struct {
 	delay  time.Duration
 	usage  *Usage
 	closed bool
+	finish string
 }
 
 // ChatStream implements Provider. The reply is split into words so a client
@@ -149,6 +152,8 @@ func (m *Mock) ChatStream(ctx context.Context, req ChatRequest) (ChatStream, err
 		reply = "mock response to: " + lastUserMessage(req.Messages)
 	}
 
+	reply, finish := limitReply(reply, req.MaxTokens)
+
 	promptTokens := 0
 	for _, msg := range req.Messages {
 		promptTokens += estimateTokens(msg.Content)
@@ -159,7 +164,8 @@ func (m *Mock) ChatStream(ctx context.Context, req ChatRequest) (ChatStream, err
 		model:   req.Model,
 		created: m.now().Unix(),
 		ctx:     ctx,
-		words:   strings.Fields(reply),
+		words:   strings.SplitAfter(reply, " "),
+		finish:  finish,
 		delay:   m.opts.Latency,
 		usage: &Usage{
 			PromptTokens:     promptTokens,
@@ -197,14 +203,11 @@ func (s *mockStream) Recv() (Chunk, error) {
 		}
 		usage := s.usage
 		s.usage = nil
-		return Chunk{FinishReason: "stop", Usage: usage}, nil
+		return Chunk{FinishReason: s.finish, Usage: usage}, nil
 	}
 
 	word := s.words[s.pos]
 	s.pos++
-	if s.pos > 1 {
-		word = " " + word
-	}
 
 	return Chunk{Delta: word}, nil
 }
@@ -212,4 +215,21 @@ func (s *mockStream) Recv() (Chunk, error) {
 func (s *mockStream) Close() error {
 	s.closed = true
 	return nil
+}
+
+func limitReply(reply string, maxTokens int) (string, string) {
+	if maxTokens == 0 || estimateTokens(reply) <= maxTokens {
+		return reply, "stop"
+	}
+	runes := []rune(reply)
+	lo, hi := 0, len(runes)
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if estimateTokens(string(runes[:mid])) <= maxTokens {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	return string(runes[:lo]), "length"
 }

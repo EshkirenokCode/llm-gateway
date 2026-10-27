@@ -52,12 +52,8 @@ func (h *Handler) streamCompletions(w http.ResponseWriter, r *http.Request, req 
 
 	stream, err := h.provider.ChatStream(ctx, req)
 	if err != nil {
-		if ctx.Err() != nil {
-			return
-		}
 		h.metrics.ObserveStream(h.provider.Name(), "start_failed")
-		h.logger.Error("upstream stream failed to start", "provider", h.provider.Name(), "error", err)
-		writeError(w, http.StatusBadGateway, "api_error", "upstream provider failed")
+		h.providerError(w, r, err)
 		return
 	}
 	defer stream.Close()
@@ -86,6 +82,9 @@ func (h *Handler) streamCompletions(w http.ResponseWriter, r *http.Request, req 
 			}
 			h.logger.Error("stream aborted", "provider", h.provider.Name(), "error", err)
 			h.metrics.ObserveStream(h.provider.Name(), "error")
+			payload, _ := json.Marshal(errorEnvelope{Error: errorBody{Type: "api_error", Message: "upstream stream interrupted"}})
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
+			flusher.Flush()
 			return
 		}
 
@@ -109,12 +108,25 @@ func (h *Handler) streamCompletions(w http.ResponseWriter, r *http.Request, req 
 		}
 
 		if chunk.Usage != nil {
-			h.metrics.ObserveTokens(h.provider.Name(), stream.Model(), chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens)
-			event.Usage = &streamUsage{
-				PromptTokens:     chunk.Usage.PromptTokens,
-				CompletionTokens: chunk.Usage.CompletionTokens,
-				TotalTokens:      chunk.Usage.TotalTokens,
+			h.metrics.ObserveTokens(h.provider.Name(), req.Model, chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens)
+		}
+		// Usage travels in a separate event with an empty choices list.
+		usageOnly := chunk.Delta == "" && chunk.FinishReason == "" && chunk.Usage != nil
+		if usageOnly {
+			event.Choices = []streamPart{}
+		}
+		if !usageOnly {
+			if err := writeEvent(w, event); err != nil {
+				h.metrics.ObserveStream(h.provider.Name(), "write_failed")
+				return
 			}
+			flusher.Flush()
+		}
+		if chunk.Usage != nil && req.StreamOptions != nil && req.StreamOptions.IncludeUsage {
+			event.Choices = []streamPart{}
+			event.Usage = &streamUsage{PromptTokens: chunk.Usage.PromptTokens, CompletionTokens: chunk.Usage.CompletionTokens, TotalTokens: chunk.Usage.TotalTokens}
+		} else {
+			continue
 		}
 
 		if err := writeEvent(w, event); err != nil {

@@ -1,6 +1,4 @@
-// Command gateway is a self-hosted, OpenAI-compatible LLM gateway that adds
-// per-tenant authentication, cost accounting, budgets and provider failover
-// in front of multiple model providers.
+// Command gateway runs a self-hosted chat API gateway.
 package main
 
 import (
@@ -96,20 +94,31 @@ func run() error {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 
-	// NotifyContext cancels ctx on the first SIGINT/SIGTERM and restores the
-	// default handler afterwards, so a second signal kills the process outright.
+	// NotifyContext initiates graceful shutdown on SIGINT or SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	provider := providers.NewMock(providers.MockOptions{})
+	var provider providers.Provider = providers.NewMock(providers.MockOptions{})
+	if cfg.Provider == "compatible" {
+		provider = providers.NewHTTP(cfg.UpstreamURL, cfg.UpstreamKey, cfg.RequestTimeout)
+	}
 	metrics := telemetry.NewMetrics()
 	health := proxy.NewHealth(version, nil)
 	handler := proxy.NewHandler(provider, logger, metrics, health)
+	tenants, err := cfg.Tenants()
+	if err != nil {
+		return err
+	}
+	handler.Configure(proxy.Options{Tenants: tenants, Models: cfg.Models, Timeout: cfg.RequestTimeout, MetricsKey: cfg.MetricsKey})
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           handler.Routes(),
 		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
+		IdleTimeout:       60 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      cfg.RequestTimeout + 5*time.Second,
+		MaxHeaderBytes:    32 << 10,
 	}
 
 	// ListenAndServe blocks, so it runs in its own goroutine and reports a
@@ -131,6 +140,7 @@ func run() error {
 		}
 		return nil
 	case <-ctx.Done():
+		stop()
 		logger.Info("shutdown signal received", "timeout", cfg.ShutdownTimeout.String())
 	}
 
@@ -144,6 +154,7 @@ func run() error {
 	defer cancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
+		_ = srv.Close()
 		return fmt.Errorf("graceful shutdown: %w", err)
 	}
 

@@ -20,8 +20,8 @@ test: ## Run all tests with the race detector
 test-docker: ## Run tests with -race inside Linux (no gcc needed on the host)
 	docker run --rm -v "$(CURDIR)":/src -w /src golang:1.25-alpine sh -c "apk add --no-cache gcc musl-dev >/dev/null && go test -race -count=1 $(PKG)"
 
-lint: ## Run golangci-lint
-	golangci-lint run
+lint: ## Run Go static analysis
+	go vet $(PKG)
 
 fmt: ## Format the codebase
 	go fmt $(PKG)
