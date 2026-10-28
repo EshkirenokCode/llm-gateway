@@ -57,3 +57,11 @@ func TestRecorderKeepsFirstStatusAndStreaming(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, implicit.wroteHeader)
 }
+
+type flushFailure struct{ *httptest.ResponseRecorder }
+
+func (w *flushFailure) FlushError() error { return http.ErrNotSupported }
+func TestRecorderPropagatesFlushFailure(t *testing.T) {
+	r := &statusRecorder{ResponseWriter: &flushFailure{httptest.NewRecorder()}, status: 200}
+	require.ErrorIs(t, http.NewResponseController(r).Flush(), http.ErrNotSupported)
+}

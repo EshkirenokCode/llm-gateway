@@ -144,3 +144,36 @@ func TestMockHonorsOutputLimitAndPreservesStreamText(t *testing.T) {
 	require.Equal(t, result.Choices[0].Message.Content, text.String())
 	require.Equal(t, "length", finish)
 }
+
+func TestHTTPRejectsInvalidStreamEnvelopes(t *testing.T) {
+	for _, tc := range []struct{ name, body, contentType string }{
+		{"multiline event exceeds limit", strings.Repeat("data: "+strings.Repeat(" ", 1024)+"\n", 1025) + "\n", "text/event-stream"},
+		{"null event", "data: null\n\n", "text/event-stream"},
+		{"empty event", "data: {\"id\":\"x\"}\n\n", "text/event-stream"},
+		{"negative total", "data: {\"id\":\"x\",\"choices\":[],\"usage\":{\"total_tokens\":-1}}\n\n", "text/event-stream"},
+		{"invalid MIME suffix", "data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n", "text/event-stream-invalid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", tc.contentType)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer server.Close()
+			stream, err := providers.NewHTTP(server.URL, "", time.Second).ChatStream(context.Background(), providers.ChatRequest{Model: "m"})
+			if stream != nil {
+				_ = stream.Close()
+			}
+			require.Error(t, err)
+			if tc.name == "multiline event exceeds limit" {
+				require.ErrorContains(t, err, "exceeds")
+			}
+		})
+	}
+}
+func TestHTTPTimeoutRetainsClassification(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.Copy(io.Discard, r.Body); <-r.Context().Done() }))
+	defer server.Close()
+	_, err := providers.NewHTTP(server.URL, "", 20*time.Millisecond).Chat(context.Background(), providers.ChatRequest{})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.NotContains(t, err.Error(), server.URL)
+}

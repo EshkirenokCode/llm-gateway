@@ -124,13 +124,14 @@ func (r *statusRecorder) Write(p []byte) (int, error) {
 // Flush available for streaming responses.
 func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
-func (r *statusRecorder) Flush() {
+func (r *statusRecorder) Flush() { _ = r.FlushError() }
+
+// FlushError allows ResponseController to observe failed downstream writes.
+func (r *statusRecorder) FlushError() error {
 	if !r.wroteHeader {
 		r.WriteHeader(http.StatusOK)
 	}
-	if f, ok := r.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
+	return http.NewResponseController(r.ResponseWriter).Flush()
 }
 
 // Middleware records metrics for every request. The route label comes from the

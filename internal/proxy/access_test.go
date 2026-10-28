@@ -1,8 +1,10 @@
 package proxy_test
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -51,30 +53,63 @@ func TestTenantAuthenticationAndIsolation(t *testing.T) {
 	require.Equal(t, 200, request(h, "/v1/models", tenantKey+"2", "").Code)
 	require.Equal(t, 200, request(h, "/readyz", "", "").Code)
 }
+
+type gatedProvider struct {
+	providers.Provider
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *gatedProvider) Chat(ctx context.Context, req providers.ChatRequest) (*providers.ChatResponse, error) {
+	p.started <- struct{}{}
+	select {
+	case <-p.release:
+		return p.Provider.Chat(ctx, req)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
 func TestConcurrentTenantLimit(t *testing.T) {
-	h := configured(t, proxy.Options{Tenants: []proxy.Tenant{{Name: "one", Key: tenantKey, RPM: 100, Concurrency: 2}}}, providers.NewMock(providers.MockOptions{Latency: 30 * time.Millisecond}))
-	var wg sync.WaitGroup
-	codes := make(chan int, 20)
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
+	provider := &gatedProvider{Provider: providers.NewMock(providers.MockOptions{}), started: make(chan struct{}, 2), release: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h := configured(t, proxy.Options{Tenants: []proxy.Tenant{{Name: "one", Key: tenantKey, RPM: 100, Concurrency: 2}}}, provider)
+	const body = `{"model":"m","messages":[{"role":"user","content":"hello"}]}`
+	results := make(chan int, 2)
+	for i := 0; i < 2; i++ {
 		go func() {
-			defer wg.Done()
-			codes <- request(h, "/v1/chat/completions", tenantKey, `{"model":"m","messages":[{"role":"user","content":"hello"}]}`).Code
+			r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)).WithContext(ctx)
+			r.Header.Set("Authorization", "Bearer "+tenantKey)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			results <- w.Code
 		}()
 	}
-	wg.Wait()
-	close(codes)
-	successes := 0
-	for code := range codes {
-		if code == 200 {
-			successes++
-		} else {
-			require.Equal(t, 429, code)
+	for i := 0; i < 2; i++ {
+		select {
+		case <-provider.started:
+		case <-time.After(time.Second):
+			t.Fatal("requests did not occupy both slots")
 		}
 	}
-	require.Equal(t, 2, successes)
-	require.Equal(t, 200, request(h, "/v1/chat/completions", tenantKey, `{"model":"m","messages":[{"role":"user","content":"hello"}]}`).Code)
+	var wg sync.WaitGroup
+	rejections := make(chan int, 18)
+	for i := 0; i < 18; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); rejections <- request(h, "/v1/chat/completions", tenantKey, body).Code }()
+	}
+	wg.Wait()
+	close(rejections)
+	for code := range rejections {
+		require.Equal(t, http.StatusTooManyRequests, code)
+	}
+	close(provider.release)
+	for i := 0; i < 2; i++ {
+		require.Equal(t, http.StatusOK, <-results)
+	}
+	require.Equal(t, http.StatusOK, request(h, "/v1/models", tenantKey, "").Code)
 }
+
 func TestModelsMetricsAndTimeout(t *testing.T) {
 	h := configured(t, proxy.Options{Models: []string{"enabled"}, MetricsKey: "metrics-secret", Timeout: time.Millisecond}, providers.NewMock(providers.MockOptions{Latency: 10 * time.Millisecond}))
 	require.Equal(t, 400, request(h, "/v1/chat/completions", "", `{"model":"disabled","messages":[{"role":"user","content":"hi"}]}`).Code)
@@ -112,4 +147,63 @@ func TestCancelledRequestReleasesSlot(t *testing.T) {
 	r.Header.Set("Authorization", "Bearer "+tenantKey)
 	h.ServeHTTP(httptest.NewRecorder(), r)
 	require.Equal(t, 200, request(h, "/v1/models", tenantKey, "").Code)
+}
+
+func TestRequestBodyLimitStatus(t *testing.T) {
+	h := testHandler(t, providers.NewMock(providers.MockOptions{}))
+	body := `{"model":"m","messages":[{"role":"user","content":"` + strings.Repeat("x", 1<<20) + `"}]}`
+	require.Equal(t, http.StatusRequestEntityTooLarge, request(h, "/v1/chat/completions", "", body).Code)
+	valid := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
+	require.Equal(t, http.StatusRequestEntityTooLarge, request(h, "/v1/chat/completions", "", valid+strings.Repeat(" ", 1<<20)).Code)
+}
+func TestStreamDeadlineIsNotClientDisconnect(t *testing.T) {
+	h := configured(t, proxy.Options{Timeout: 5 * time.Millisecond}, providers.NewMock(providers.MockOptions{Latency: time.Second}))
+	w := request(h, "/v1/chat/completions", "", `{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+	require.Contains(t, w.Body.String(), "timeout_error")
+	require.NotContains(t, w.Body.String(), "[DONE]")
+	metrics := request(h, "/metrics", "", "").Body.String()
+	require.Contains(t, metrics, `gateway_streams_total{outcome="timeout",provider="mock"} 1`)
+	require.NotContains(t, metrics, `outcome="client_gone"`)
+}
+
+func TestSlowRequestBodyHonorsRequestDeadline(t *testing.T) {
+	for _, prefix := range []string{`{"model":`, `{"model":"m","messages":[{"role":"user","content":"hi"}]}`} {
+		t.Run(prefix, func(t *testing.T) {
+			h := configured(t, proxy.Options{Timeout: 30 * time.Millisecond}, providers.NewMock(providers.MockOptions{}))
+			server := httptest.NewServer(h)
+			defer server.Close()
+			conn, err := net.Dial("tcp", server.Listener.Addr().String())
+			require.NoError(t, err)
+			defer conn.Close()
+			require.NoError(t, conn.SetDeadline(time.Now().Add(2*time.Second)))
+			_, err = conn.Write([]byte("POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n" + prefix))
+			require.NoError(t, err)
+			response, err := http.ReadResponse(bufio.NewReader(conn), nil)
+			require.NoError(t, err)
+			defer response.Body.Close()
+			require.Equal(t, http.StatusRequestTimeout, response.StatusCode)
+		})
+	}
+}
+
+func TestCumulativeStreamUsageIsAccountedOnce(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"id":"x","choices":[{"delta":{"content":"hi"}}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}
+
+data: {"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":8,"total_tokens":10}}
+
+data: [DONE]
+
+`))
+	}))
+	defer upstream.Close()
+	h := configured(t, proxy.Options{}, providers.NewHTTP(upstream.URL, "", time.Second))
+	w := request(h, "/v1/chat/completions", "", `{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+	require.Contains(t, w.Body.String(), "[DONE]")
+	metrics := request(h, "/metrics", "", "").Body.String()
+	require.Contains(t, metrics, `gateway_tokens_total{kind="completion",model="m",provider="compatible"} 8`)
+	require.Contains(t, metrics, `gateway_tokens_total{kind="prompt",model="m",provider="compatible"} 2`)
 }

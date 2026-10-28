@@ -14,6 +14,9 @@ var playgroundCSS string
 
 //go:embed web/app.js
 var playgroundJS string
+
+//go:embed web/sse.mjs
+var playgroundSSE string
 var playgroundTemplate = template.Must(template.New("playground").Parse(playgroundHTML))
 
 func (h *Handler) playground(w http.ResponseWriter, _ *http.Request) {

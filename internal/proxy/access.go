@@ -5,12 +5,14 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
-	"github.com/EshkirenokCode/llm-gateway/internal/tenant"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/EshkirenokCode/llm-gateway/internal/tenant"
 )
 
 // Tenant limits apply to this process and reset when it restarts.
@@ -86,6 +88,15 @@ func (h *Handler) guard(next http.Handler) http.Handler {
 		if a.timeout > 0 {
 			ctx, cancel := context.WithTimeout(r.Context(), a.timeout)
 			defer cancel()
+			// A context deadline alone cannot interrupt a blocked HTTP body read.
+			readDeadline := time.Now().Add(15 * time.Second)
+			if deadline, ok := ctx.Deadline(); ok && deadline.Before(readDeadline) {
+				readDeadline = deadline
+			}
+			controller := http.NewResponseController(w)
+			if controller.SetReadDeadline(readDeadline) == nil {
+				defer func() { _ = controller.SetReadDeadline(time.Time{}) }()
+			}
 			r = r.WithContext(ctx)
 		}
 		next.ServeHTTP(w, r)
@@ -104,7 +115,7 @@ func (h *Handler) providerError(w http.ResponseWriter, r *http.Request, err erro
 	if r.Context().Err() == context.Canceled {
 		return
 	}
-	if r.Context().Err() == context.DeadlineExceeded {
+	if errors.Is(r.Context().Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
 		writeError(w, 504, "timeout_error", "provider deadline exceeded")
 		return
 	}

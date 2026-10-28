@@ -73,6 +73,9 @@ func (c Config) Validate() error {
 	if c.Provider != "mock" && c.Provider != "compatible" {
 		return fmt.Errorf("GATEWAY_PROVIDER must be mock or compatible")
 	}
+	if !validCredential(c.UpstreamKey) || !validCredential(c.MetricsKey) {
+		return fmt.Errorf("upstream and metrics keys must contain printable ASCII without whitespace")
+	}
 	if c.RequestTimeout <= 0 {
 		return fmt.Errorf("GATEWAY_REQUEST_TIMEOUT must be positive")
 	}
@@ -92,7 +95,7 @@ func (c Config) Validate() error {
 	}
 	if c.Provider == "compatible" {
 		u, err := url.Parse(c.UpstreamURL)
-		if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		if err != nil || u.Hostname() == "" || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 			return fmt.Errorf("GATEWAY_UPSTREAM_URL must be an HTTP(S) API base URL without credentials or query")
 		}
 		if len(tenants) == 0 {
@@ -134,11 +137,20 @@ func (c Config) Tenants() ([]tenant.Policy, error) {
 	}
 	names, keys := map[string]bool{}, map[string]bool{}
 	for _, t := range tenants {
-		if strings.TrimSpace(t.Name) == "" || len(t.Key) < 24 || strings.TrimSpace(t.Key) != t.Key || t.RPM <= 0 || t.Concurrency <= 0 || names[t.Name] || keys[t.Key] {
+		if strings.TrimSpace(t.Name) == "" || len(t.Key) < 24 || !validCredential(t.Key) || strings.TrimSpace(t.Key) != t.Key || t.RPM <= 0 || t.Concurrency <= 0 || names[t.Name] || keys[t.Key] {
 			return nil, fmt.Errorf("GATEWAY_TENANTS requires unique names, unique keys of at least 24 characters, and positive limits")
 		}
 		names[t.Name] = true
 		keys[t.Key] = true
 	}
 	return tenants, nil
+}
+
+func validCredential(key string) bool {
+	for _, c := range key {
+		if c < 33 || c > 126 {
+			return false
+		}
+	}
+	return true
 }

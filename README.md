@@ -8,13 +8,13 @@ Keep upstream credentials on the server, give each application its own key, and 
 
 ## Try it
 
-Requires Go 1.25 or newer. No database, frontend build step or external account is needed.
+Requires Go 1.27.3 or newer. No database, frontend build step or external account is needed.
 
 ```sh
 go run ./cmd/gateway
 ```
 
-Open **http://localhost:8080**. The default `mock` provider echoes your prompt locally; it does not generate model answers or make paid requests. The playground supports streaming, cancellation, conversation history and request statistics. Keys and history stay in page memory.
+Open **http://localhost:8080**. The default `mock` provider echoes your prompt locally; it does not generate model answers or make paid requests. The playground supports streaming, cancellation, conversation history and request statistics. Keys and history stay in page memory. Changing models clears conversation context.
 
 ```sh
 curl http://localhost:8080/v1/chat/completions \
@@ -84,7 +84,7 @@ The included Compose stack is a fixed, zero-configuration mock demo. For a live 
 
 Supported request fields: `model`, `messages`, `stream`, `max_tokens`, `temperature`, `stream_options.include_usage`. Messages contain a string `content` and `system`, `user` or `assistant` role. Unknown fields are rejected to avoid silently dropping parameters. This is a deliberate subset of the chat protocol: tools, images, audio, multiple choices and the Responses API are outside this service's contract.
 
-Errors use `{"error":{"message":"...","type":"..."}}`. Validation returns `400`, authentication `401`, tenant limits `429` with `Retry-After`, upstream failure `502`, and gateway deadline expiry `504`. `X-Request-ID` accompanies API responses. If a committed stream fails, the gateway emits a generic error event and closes without `[DONE]`; clients must treat a missing sentinel as incomplete.
+Errors use `{"error":{"message":"...","type":"..."}}`. Validation returns `400`, oversized bodies `413`, body read deadlines `408`, authentication `401`, tenant limits `429` with `Retry-After`, upstream failure `502`, and gateway deadline expiry `504`. `X-Request-ID` accompanies API responses. If a committed stream fails, the gateway emits a generic error event and closes without `[DONE]`; clients must treat a missing sentinel as incomplete.
 
 ## Configuration
 
@@ -102,7 +102,7 @@ Errors use `{"error":{"message":"...","type":"..."}}`. Validation returns `400`,
 | `GATEWAY_READ_HEADER_TIMEOUT` | `10s` | Header read deadline |
 | `GATEWAY_SHUTDOWN_TIMEOUT` | `15s` | Drain deadline |
 
-Tenant names and keys must be unique, keys at least 24 characters long, and both limits positive. All authenticated API requests, including model listing and rejected chat requests, consume the tenant's request allowance. Fixed one-minute windows begin with the tenant's first request; concurrency slots are released on every exit path. Limits live in memory, apply per process and reset on restart. They are request controls, not financial budgets.
+Tenant names and keys must be unique, keys at least 24 characters long with printable ASCII and no whitespace, and both limits positive. All authenticated API requests, including model listing and rejected chat requests, consume the tenant's request allowance. Fixed one-minute windows begin with the tenant's first request; concurrency slots are released on every exit path. Limits live in memory, apply per process and reset on restart. They are request controls, not financial budgets.
 
 ## Architecture
 
@@ -125,12 +125,14 @@ The gateway makes **one upstream attempt per request**. It does not automaticall
 
 ```sh
 make test       # race detector and all tests
+make test-web   # browser stream reader tests (Node.js 22+)
+make vuln       # reachable vulnerability scan (requires network access)
 make lint       # go vet
 make build      # bin/gateway
 make docker     # distroless, non-root image
 ```
 
-Tests exercise the HTTP adapter against local servers: auth forwarding, deadlines, redirects, malformed upstream responses, stream usage and truncation. Handler tests cover concurrent tenant limits, isolation, cancellation, model policy and HTTP errors. No real upstream credentials are needed. CI checks formatting, vet, race tests, container build and leaked secrets on pushes and pull requests.
+Tests exercise the HTTP adapter against local servers: auth forwarding, deadlines, redirects, malformed upstream responses, stream usage and truncation. Handler tests cover concurrent tenant limits, isolation, cancellation, model policy and HTTP errors. No real upstream credentials are needed. CI checks formatting, vet, race tests, reachable vulnerabilities, browser stream parsing, container build and leaked secrets on pushes and pull requests.
 
 See [operations](docs/operations.md) for deployment boundaries and [the demo walkthrough](docs/demo.md) for a short presentation.
 

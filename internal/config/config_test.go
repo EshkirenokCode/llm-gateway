@@ -163,3 +163,19 @@ func TestCompatibleConfiguration(t *testing.T) {
 		})
 	}
 }
+
+func TestCredentialsRejectUnusableHeaderValues(t *testing.T) {
+	for _, key := range []string{"a key containing a space", "a-key-containing-a-newline\n", "a-key-containing-кириллица"} {
+		cfg := valid()
+		cfg.UpstreamKey = key
+		require.Error(t, cfg.Validate())
+		cfg = valid()
+		cfg.MetricsKey = key
+		require.Error(t, cfg.Validate())
+	}
+	cfg := valid()
+	cfg.Provider = "compatible"
+	cfg.UpstreamURL = "http://:8080/v1"
+	cfg.TenantsJSON = `[{"name":"app","key":"example-key-at-least-24-characters","rpm":1,"concurrency":1}]`
+	require.Error(t, cfg.Validate())
+}

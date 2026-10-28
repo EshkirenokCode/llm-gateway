@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,111 +41,106 @@ type streamUsage struct {
 }
 
 func (h *Handler) streamCompletions(w http.ResponseWriter, r *http.Request, req providers.ChatRequest) {
-	// Without a flusher the response is buffered and the client sees nothing
-	// until the whole answer is ready, which defeats streaming.
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeError(w, http.StatusInternalServerError, "api_error", "streaming is not supported by this server")
-		return
-	}
-
 	ctx := r.Context()
-
+	start := time.Now()
+	outcome := "start_failed"
+	defer func() {
+		h.metrics.ObserveStream(h.provider.Name(), outcome)
+		upstreamOutcome := "error"
+		if outcome == "completed" {
+			upstreamOutcome = "success"
+		}
+		h.metrics.ObserveUpstream(h.provider.Name(), upstreamOutcome, time.Since(start))
+	}()
 	stream, err := h.provider.ChatStream(ctx, req)
 	if err != nil {
-		h.metrics.ObserveStream(h.provider.Name(), "start_failed")
 		h.providerError(w, r, err)
 		return
 	}
 	defer stream.Close()
-
-	// Headers must go out before the first chunk. After this point the status
-	// code is fixed at 200, so later failures can only end the stream.
+	controller := http.NewResponseController(w)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
-
-	start := time.Now()
+	outcome = "write_failed"
+	if controller.Flush() != nil {
+		return
+	}
+	send := func(event streamChunk) error {
+		if err := writeEvent(w, event); err != nil {
+			return err
+		}
+		return controller.Flush()
+	}
+	fail := func(kind, message string) {
+		payload, _ := json.Marshal(errorEnvelope{Error: errorBody{Type: kind, Message: message}})
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err == nil {
+			_ = controller.Flush()
+		}
+	}
 	first := true
+	var usage *providers.Usage
+	defer func() {
+		if usage != nil {
+			h.metrics.ObserveTokens(h.provider.Name(), req.Model, usage.PromptTokens, usage.CompletionTokens)
+		}
+	}()
 	for {
 		chunk, err := stream.Recv()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			if ctx.Err() != nil {
-				h.logger.Info("client disconnected mid-stream", "provider", h.provider.Name())
-				h.metrics.ObserveStream(h.provider.Name(), "client_gone")
+			if errors.Is(ctx.Err(), context.Canceled) {
+				outcome = "client_gone"
 				return
 			}
-			h.logger.Error("stream aborted", "provider", h.provider.Name(), "error", err)
-			h.metrics.ObserveStream(h.provider.Name(), "error")
-			payload, _ := json.Marshal(errorEnvelope{Error: errorBody{Type: "api_error", Message: "upstream stream interrupted"}})
-			_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
-			flusher.Flush()
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+				outcome = "timeout"
+				fail("timeout_error", "provider deadline exceeded")
+				return
+			}
+			outcome = "error"
+			h.logger.Error("stream aborted", "provider", h.provider.Name(), "request_id", w.Header().Get("X-Request-ID"), "error", err)
+			fail("api_error", "upstream stream interrupted")
 			return
 		}
-
-		event := streamChunk{
-			ID:      stream.ID(),
-			Object:  "chat.completion.chunk",
-			Created: stream.Created(),
-			Model:   stream.Model(),
-			Choices: []streamPart{{Delta: streamDelta{Content: chunk.Delta}}},
-		}
-
-		// OpenAI announces the assistant role once, on the first chunk.
-		if first {
-			event.Choices[0].Delta.Role = "assistant"
-			first = false
-		}
-
-		if chunk.FinishReason != "" {
-			reason := chunk.FinishReason
-			event.Choices[0].FinishReason = &reason
-		}
-
+		// Providers may repeat cumulative usage; account for the final snapshot once.
 		if chunk.Usage != nil {
-			h.metrics.ObserveTokens(h.provider.Name(), req.Model, chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens)
+			snapshot := *chunk.Usage
+			usage = &snapshot
 		}
-		// Usage travels in a separate event with an empty choices list.
+		event := streamChunk{ID: stream.ID(), Object: "chat.completion.chunk", Created: stream.Created(), Model: stream.Model(), Choices: []streamPart{{Delta: streamDelta{Content: chunk.Delta}}}}
 		usageOnly := chunk.Delta == "" && chunk.FinishReason == "" && chunk.Usage != nil
-		if usageOnly {
-			event.Choices = []streamPart{}
-		}
 		if !usageOnly {
-			if err := writeEvent(w, event); err != nil {
-				h.metrics.ObserveStream(h.provider.Name(), "write_failed")
+			if first {
+				event.Choices[0].Delta.Role = "assistant"
+				first = false
+			}
+			if chunk.FinishReason != "" {
+				reason := chunk.FinishReason
+				event.Choices[0].FinishReason = &reason
+			}
+			if send(event) != nil {
 				return
 			}
-			flusher.Flush()
 		}
 		if chunk.Usage != nil && req.StreamOptions != nil && req.StreamOptions.IncludeUsage {
 			event.Choices = []streamPart{}
 			event.Usage = &streamUsage{PromptTokens: chunk.Usage.PromptTokens, CompletionTokens: chunk.Usage.CompletionTokens, TotalTokens: chunk.Usage.TotalTokens}
-		} else {
-			continue
+			if send(event) != nil {
+				return
+			}
 		}
-
-		if err := writeEvent(w, event); err != nil {
-			h.logger.Info("stopped writing to client", "error", err)
-			h.metrics.ObserveStream(h.provider.Name(), "write_failed")
-			return
-		}
-		flusher.Flush()
 	}
-
-	h.metrics.ObserveUpstream(h.provider.Name(), "success", time.Since(start))
-	h.metrics.ObserveStream(h.provider.Name(), "completed")
-
-	// The sentinel tells OpenAI clients the stream ended normally.
 	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
 		return
 	}
-	flusher.Flush()
+	if controller.Flush() != nil {
+		return
+	}
+	outcome = "completed"
 }
 
 func writeEvent(w io.Writer, event streamChunk) error {

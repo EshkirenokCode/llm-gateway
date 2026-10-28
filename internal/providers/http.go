@@ -5,8 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -43,7 +46,7 @@ func (p *HTTP) request(ctx context.Context, req ChatRequest) (*http.Response, er
 	}
 	resp, err := p.client.Do(r)
 	if err != nil {
-		return nil, fmt.Errorf("upstream transport failed")
+		return nil, upstreamFailure(err, "upstream transport failed")
 	}
 	if resp.StatusCode != http.StatusOK {
 		_ = resp.Body.Close()
@@ -58,14 +61,17 @@ func (p *HTTP) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error)
 	}
 	defer resp.Body.Close()
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, (8<<20)+1))
-	if err != nil || len(payload) > 8<<20 {
+	if err != nil {
+		return nil, upstreamFailure(err, "upstream response read failed")
+	}
+	if len(payload) > 8<<20 {
 		return nil, fmt.Errorf("upstream response could not be read within limits")
 	}
 	var result ChatResponse
 	if err = json.Unmarshal(payload, &result); err != nil {
 		return nil, fmt.Errorf("invalid upstream JSON")
 	}
-	if result.ID == "" || len(result.Choices) == 0 || result.Usage.PromptTokens < 0 || result.Usage.CompletionTokens < 0 {
+	if result.ID == "" || len(result.Choices) == 0 || result.Usage.PromptTokens < 0 || result.Usage.CompletionTokens < 0 || result.Usage.TotalTokens < 0 {
 		return nil, fmt.Errorf("invalid upstream completion")
 	}
 	return &result, nil
@@ -77,7 +83,8 @@ func (p *HTTP) ChatStream(ctx context.Context, req ChatRequest) (ChatStream, err
 	if err != nil {
 		return nil, err
 	}
-	if !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+	contentType, _, parseErr := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if parseErr != nil || contentType != "text/event-stream" {
 		_ = resp.Body.Close()
 		return nil, fmt.Errorf("upstream did not return an event stream")
 	}
@@ -124,9 +131,14 @@ func (s *httpStream) read() (Chunk, error) {
 		return Chunk{}, io.EOF
 	}
 	var data []string
+	eventBytes := 0
 	for s.scanner.Scan() {
 		line := s.scanner.Text()
 		if strings.HasPrefix(line, "data:") {
+			eventBytes += len(line) + 1
+			if eventBytes > 1<<20 {
+				return Chunk{}, fmt.Errorf("upstream stream event exceeds 1048576 bytes")
+			}
 			data = append(data, strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
 			continue
 		}
@@ -135,6 +147,7 @@ func (s *httpStream) read() (Chunk, error) {
 		}
 		payload := strings.Join(data, "\n")
 		data = nil
+		eventBytes = 0
 		if payload == "[DONE]" {
 			s.done = true
 			return Chunk{}, io.EOF
@@ -152,7 +165,7 @@ func (s *httpStream) read() (Chunk, error) {
 			Usage *Usage          `json:"usage"`
 			Error json.RawMessage `json:"error"`
 		}
-		if json.Unmarshal([]byte(payload), &event) != nil || len(event.Error) > 0 {
+		if json.Unmarshal([]byte(payload), &event) != nil || (len(event.Error) > 0 && string(event.Error) != "null") || (len(event.Choices) == 0 && event.Usage == nil) || len(event.Choices) > 1 {
 			return Chunk{}, fmt.Errorf("invalid upstream stream event")
 		}
 		if event.ID != "" {
@@ -165,7 +178,7 @@ func (s *httpStream) read() (Chunk, error) {
 			s.created = event.Created
 		}
 		c := Chunk{Usage: event.Usage}
-		if c.Usage != nil && (c.Usage.PromptTokens < 0 || c.Usage.CompletionTokens < 0) {
+		if c.Usage != nil && (c.Usage.PromptTokens < 0 || c.Usage.CompletionTokens < 0 || c.Usage.TotalTokens < 0) {
 			return Chunk{}, fmt.Errorf("invalid upstream usage")
 		}
 		if len(event.Choices) > 0 {
@@ -175,7 +188,19 @@ func (s *httpStream) read() (Chunk, error) {
 		return c, nil
 	}
 	if err := s.scanner.Err(); err != nil {
-		return Chunk{}, fmt.Errorf("upstream stream read failed")
+		return Chunk{}, upstreamFailure(err, "upstream stream read failed")
 	}
 	return Chunk{}, fmt.Errorf("upstream stream ended without DONE")
+}
+
+// Keep cancellation and deadline classification without exposing URLs or keys.
+func upstreamFailure(err error, message string) error {
+	if errors.Is(err, context.Canceled) {
+		return fmt.Errorf("%s: %w", message, context.Canceled)
+	}
+	var networkError net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &networkError) && networkError.Timeout()) {
+		return fmt.Errorf("%s: %w", message, context.DeadlineExceeded)
+	}
+	return errors.New(message)
 }

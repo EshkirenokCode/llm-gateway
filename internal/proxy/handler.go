@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -35,6 +37,9 @@ type Handler struct {
 
 // NewHandler returns a Handler backed by the given provider.
 func NewHandler(provider providers.Provider, logger *slog.Logger, metrics *telemetry.Metrics, health *Health) *Handler {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	if metrics == nil {
 		metrics = telemetry.NewMetrics()
 	}
@@ -67,6 +72,7 @@ func (h *Handler) Routes() http.Handler {
 	}))
 	r.Get("/", h.playground)
 	r.Get("/assets/style.css", staticAsset(playgroundCSS, "text/css; charset=utf-8"))
+	r.Get("/assets/sse.mjs", staticAsset(playgroundSSE, "text/javascript; charset=utf-8"))
 	r.Get("/assets/app.js", staticAsset(playgroundJS, "text/javascript; charset=utf-8"))
 	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, 404, "invalid_request_error", "route not found")
@@ -82,7 +88,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	totalStart := time.Now()
 	req, err := decodeChatRequest(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		status := http.StatusBadRequest
+		var networkError net.Error
+		if errors.As(err, &networkError) && networkError.Timeout() {
+			r.Close = true
+			w.Header().Set("Connection", "close")
+			writeError(w, http.StatusRequestTimeout, "timeout_error", "request body deadline exceeded")
+			return
+		}
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeError(w, status, "invalid_request_error", err.Error())
 		return
 	}
 
@@ -123,13 +141,20 @@ func decodeChatRequest(r *http.Request) (providers.ChatRequest, error) {
 	if err := dec.Decode(&req); err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			return providers.ChatRequest{}, fmt.Errorf("request body exceeds %d bytes", maxRequestBody)
+			return providers.ChatRequest{}, fmt.Errorf("request body exceeds %d bytes: %w", maxRequestBody, maxErr)
 		}
 		return providers.ChatRequest{}, fmt.Errorf("malformed request body: %w", err)
 	}
 
 	// A second value means the client sent more than one JSON document.
 	if err := dec.Decode(new(struct{})); !errors.Is(err, io.EOF) {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return providers.ChatRequest{}, fmt.Errorf("request body exceeds %d bytes: %w", maxRequestBody, maxErr)
+		}
+		if err != nil {
+			return providers.ChatRequest{}, fmt.Errorf("request body must contain a single JSON object: %w", err)
+		}
 		return providers.ChatRequest{}, fmt.Errorf("request body must contain a single JSON object")
 	}
 
@@ -163,11 +188,6 @@ func validate(req providers.ChatRequest) error {
 }
 
 func isJSON(contentType string) bool {
-	for i := 0; i < len(contentType); i++ {
-		if contentType[i] == ';' {
-			contentType = contentType[:i]
-			break
-		}
-	}
-	return contentType == "application/json"
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	return err == nil && mediaType == "application/json"
 }

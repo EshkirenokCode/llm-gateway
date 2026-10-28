@@ -7,10 +7,10 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -52,10 +52,17 @@ func probe() error {
 		return err
 	}
 
-	addr := cfg.HTTPAddr
-	if strings.HasPrefix(addr, ":") {
-		addr = "127.0.0.1" + addr
+	host, port, err := net.SplitHostPort(cfg.HTTPAddr)
+	if err != nil {
+		return fmt.Errorf("healthcheck address: %w", err)
 	}
+	if host == "" || host == "0.0.0.0" {
+		host = "127.0.0.1"
+	}
+	if host == "::" {
+		host = "::1"
+	}
+	addr := net.JoinHostPort(host, port)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -65,7 +72,9 @@ func probe() error {
 		return err
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}

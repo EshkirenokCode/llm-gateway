@@ -1,3 +1,5 @@
+import { readCompletionStream } from "./sse.mjs";
+
 const $ = (id) => document.getElementById(id);
 let history = [],
   controller = null;
@@ -40,6 +42,11 @@ function metric(id, value, unit = "") {
     el.append(small);
   }
 }
+$("model").onchange = () => {
+  history = [];
+  $("messages").replaceChildren();
+  $("status-text").textContent = "Model changed · conversation cleared.";
+};
 $("stop").onclick = () => controller?.abort();
 $("clear").onclick = () => {
   if (controller) return;
@@ -72,6 +79,8 @@ $("form").onsubmit = async (e) => {
   }
   controller = new AbortController();
   $("send").disabled = true;
+  for (const id of ["model", "key", "tokens", "stream", "prompt"])
+    $(id).disabled = true;
   $("clear").disabled = true;
   $("stop").hidden = false;
   $("status-text").textContent = "Request in flight…";
@@ -111,39 +120,14 @@ $("form").onsubmit = async (e) => {
       throw Error(reason);
     }
     if (streaming) {
-      const reader = r.body.getReader(),
-        decoder = new TextDecoder();
-      let buffer = "",
-        done = false;
-      while (true) {
-        const part = await reader.read();
-        if (part.done) break;
-        buffer += decoder.decode(part.value, { stream: true });
-        let end;
-        while ((end = buffer.indexOf("\n\n")) >= 0) {
-          const frame = buffer.slice(0, end);
-          buffer = buffer.slice(end + 2);
-          const data = frame
-            .split("\n")
-            .filter((l) => l.startsWith("data:"))
-            .map((l) => l.slice(5).trimStart())
-            .join("\n");
-          if (!data) continue;
-          if (data === "[DONE]") {
-            done = true;
-            continue;
-          }
-          const event = JSON.parse(data);
-          if (event.error) throw Error(event.error.message);
-          const text = event.choices?.[0]?.delta?.content || "";
-          if (text && first === null) first = performance.now() - started;
-          reply += text;
-          output.textContent = reply;
-          if (event.usage) usage = event.usage;
-          scroll();
-        }
-      }
-      if (!done) throw Error("Stream interrupted before completion");
+      await readCompletionStream(r.body, (event) => {
+        const text = event.choices?.[0]?.delta?.content || "";
+        if (text && first === null) first = performance.now() - started;
+        reply += text;
+        output.textContent = reply;
+        if (event.usage) usage = event.usage;
+        scroll();
+      });
     } else {
       const result = await r.json();
       reply = result.choices[0].message.content;
@@ -175,6 +159,8 @@ $("form").onsubmit = async (e) => {
     if (first !== null) metric("ttft", Math.round(first), "ms");
     controller = null;
     $("send").disabled = false;
+    for (const id of ["model", "key", "tokens", "stream", "prompt"])
+      $(id).disabled = false;
     $("clear").disabled = false;
     $("stop").hidden = true;
     scroll();
