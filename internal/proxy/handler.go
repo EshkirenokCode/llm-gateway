@@ -54,6 +54,7 @@ func NewHandler(provider providers.Provider, logger *slog.Logger, metrics *telem
 func (h *Handler) Routes() http.Handler {
 	r := chi.NewRouter()
 
+	r.With(h.metrics.Middleware("/v1/usage")).Get("/v1/usage", h.usage)
 	r.With(h.metrics.Middleware("/v1/models"), h.guard).Get("/v1/models", h.models)
 	r.With(h.metrics.Middleware("/v1/chat/completions"), h.guard).Post("/v1/chat/completions", h.chatCompletions)
 
@@ -117,6 +118,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	resp, err := h.provider.Chat(r.Context(), req)
 	upstream := time.Since(start)
+	var usage *providers.Usage
+	if resp != nil {
+		usage = &resp.Usage
+	}
+	h.recordTenantCompletion(r, err == nil, usage)
 	if err != nil {
 		h.metrics.ObserveUpstream(h.provider.Name(), "error", upstream)
 		h.providerError(w, r, err)

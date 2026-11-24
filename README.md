@@ -8,7 +8,7 @@ Keep upstream credentials on the server, give each application its own key, and 
 
 ## Try it
 
-Requires Go 1.27.3 or newer. No database, frontend build step or external account is needed.
+Requires Go 1.27.4 or newer. No database, frontend build step or external account is needed.
 
 ```sh
 go run ./cmd/gateway
@@ -62,6 +62,7 @@ The included Compose stack is a fixed, zero-configuration mock demo. For a live 
 
 - Text chat completions, JSON and server-sent events.
 - Tenant bearer keys with independent request and concurrency limits.
+- Authenticated per-tenant token totals, completion outcomes and remaining quota.
 - Model allowlist, strict request validation and a 1 MiB request body limit.
 - Cancellation propagated upstream and a deadline covering the whole request.
 - Upstream redirects refused to prevent credential forwarding.
@@ -77,6 +78,7 @@ The included Compose stack is a fixed, zero-configuration mock demo. For a live 
 | --- | --- | --- | --- |
 | GET | `/` | Public | Playground; exposes enabled model IDs and provider mode |
 | POST | `/v1/chat/completions` | Tenant key when configured | Text chat |
+| GET | `/v1/usage` | Tenant key required | Own token totals, request counts and remaining quota |
 | GET | `/v1/models` | Tenant key when configured | Enabled models |
 | GET | `/healthz` | Public | Process liveness and build version |
 | GET | `/readyz` | Public | Local readiness; fails during shutdown |
@@ -102,7 +104,42 @@ Errors use `{"error":{"message":"...","type":"..."}}`. Validation returns `400`,
 | `GATEWAY_READ_HEADER_TIMEOUT` | `10s` | Header read deadline |
 | `GATEWAY_SHUTDOWN_TIMEOUT` | `15s` | Drain deadline |
 
-Tenant names and keys must be unique, keys at least 24 characters long with printable ASCII and no whitespace, and both limits positive. All authenticated API requests, including model listing and rejected chat requests, consume the tenant's request allowance. Fixed one-minute windows begin with the tenant's first request; concurrency slots are released on every exit path. Limits live in memory, apply per process and reset on restart. They are request controls, not financial budgets.
+Tenant names and keys must be unique, keys at least 24 characters long with printable ASCII and no whitespace, and both limits positive. Admitted model-list and chat requests, including rejected chat payloads, consume the tenant's request allowance. `/v1/usage` requires a valid tenant key but consumes no quota and remains available when the tenant is busy or rate-limited. Fixed one-minute windows begin with the tenant's first request; concurrency slots are released on every exit path. Limits live in memory, apply per process and reset on restart. They are request controls, not financial budgets. Rate-limit responses report the remaining window in `Retry-After`; concurrency saturation suggests a one-second retry.
+
+## Inspect tenant usage
+
+```sh
+curl http://localhost:8080/v1/usage \
+  -H "Authorization: Bearer $TENANT_KEY"
+```
+
+The response contains only the authenticated tenant's data:
+
+```json
+{
+  "tenant": "portfolio",
+  "since": "2026-11-24T00:00:00Z",
+  "totals": {
+    "requests": 2,
+    "rate_limited": 0,
+    "completions": 2,
+    "failed": 0,
+    "canceled": 0,
+    "usage_reported": 2,
+    "prompt_tokens": 12,
+    "completion_tokens": 30
+  },
+  "limits": {
+    "requests_per_minute": 60,
+    "requests_remaining": 58,
+    "window_resets_at": "2026-11-24T00:01:00Z",
+    "concurrency": 4,
+    "in_flight": 0
+  }
+}
+```
+
+`requests` counts admitted API calls; completion outcomes count valid chats that reached the provider. Token totals use the last reported usage snapshot once per chat, including interrupted streams if usage was already received. `usage_reported` lets clients distinguish missing upstream usage from a genuine zero. These counters are process-local, reset on restart, and are not a financial ledger. Anonymous demo mode has no usage account and returns `401` for this endpoint.
 
 ## Architecture
 
@@ -132,7 +169,7 @@ make build      # bin/gateway
 make docker     # distroless, non-root image
 ```
 
-Tests exercise the HTTP adapter against local servers: auth forwarding, deadlines, redirects, malformed upstream responses, stream usage and truncation. Handler tests cover concurrent tenant limits, isolation, cancellation, model policy and HTTP errors. No real upstream credentials are needed. CI checks formatting, vet, race tests, reachable vulnerabilities, browser stream parsing, container build and leaked secrets on pushes and pull requests.
+Tests exercise the HTTP adapter against local servers: auth forwarding, deadlines, redirects, malformed upstream responses, stream usage and truncation. Handler tests cover concurrent tenant limits, isolation, cancellation, model policy and HTTP errors. No real upstream credentials are needed. CI checks formatting, vet, race tests, reachable vulnerabilities, browser stream parsing, container build, container smoke checks and leaked secrets on pushes and pull requests.
 
 See [operations](docs/operations.md) for deployment boundaries and [the demo walkthrough](docs/demo.md) for a short presentation.
 

@@ -44,7 +44,9 @@ func (h *Handler) streamCompletions(w http.ResponseWriter, r *http.Request, req 
 	ctx := r.Context()
 	start := time.Now()
 	outcome := "start_failed"
+	var usage *providers.Usage
 	defer func() {
+		h.recordTenantCompletion(r, outcome == "completed", usage)
 		h.metrics.ObserveStream(h.provider.Name(), outcome)
 		upstreamOutcome := "error"
 		if outcome == "completed" {
@@ -80,7 +82,6 @@ func (h *Handler) streamCompletions(w http.ResponseWriter, r *http.Request, req 
 		}
 	}
 	first := true
-	var usage *providers.Usage
 	defer func() {
 		if usage != nil {
 			h.metrics.ObserveTokens(h.provider.Name(), req.Model, usage.PromptTokens, usage.CompletionTokens)

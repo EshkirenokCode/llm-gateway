@@ -7,7 +7,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +30,8 @@ type tenantState struct {
 	config           Tenant
 	window           time.Time
 	requests, active int
+	since            time.Time
+	totals           TenantTotals
 }
 type access struct {
 	mu         sync.Mutex
@@ -35,55 +39,55 @@ type access struct {
 	models     []string
 	timeout    time.Duration
 	metricsKey string
+	now        func() time.Time
 }
 
 func (h *Handler) Configure(opts Options) {
-	a := &access{tenants: make(map[[32]byte]*tenantState), models: opts.Models, timeout: opts.Timeout, metricsKey: opts.MetricsKey}
+	a := &access{tenants: make(map[[32]byte]*tenantState), models: append([]string(nil), opts.Models...), timeout: opts.Timeout, metricsKey: opts.MetricsKey, now: time.Now}
 	for _, t := range opts.Tenants {
 		hash := sha256.Sum256([]byte(t.Key))
 		t.Key = ""
-		a.tenants[hash] = &tenantState{config: t}
+		a.tenants[hash] = &tenantState{config: t, since: a.now().UTC()}
 	}
 	h.access = a
 }
 func (h *Handler) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := make([]byte, 12)
-		if _, err := rand.Read(id); err != nil {
-			writeError(w, 500, "api_error", "request ID unavailable")
-			return
-		}
-		w.Header().Set("X-Request-ID", hex.EncodeToString(id))
-		w.Header().Set("Cache-Control", "no-store")
+		setRequestHeaders(w)
 		a := h.access
 		if a == nil {
 			next.ServeHTTP(w, r)
 			return
 		}
 		if len(a.tenants) > 0 {
-			key, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 			a.mu.Lock()
-			t := a.tenants[sha256.Sum256([]byte(key))]
-			if !ok || t == nil {
+			t := a.authenticate(r)
+			if t == nil {
 				a.mu.Unlock()
 				writeError(w, 401, "authentication_error", "valid bearer token required")
 				return
 			}
-			now := time.Now()
-			if now.Sub(t.window) >= time.Minute {
-				t.window = now
-				t.requests = 0
+			now := a.now()
+			t.resetWindow(now)
+			retryAfter := 0
+			if t.requests >= t.config.RPM {
+				retryAfter = max(1, int(math.Ceil(t.window.Add(time.Minute).Sub(now).Seconds())))
+			} else if t.active >= t.config.Concurrency {
+				retryAfter = 1
 			}
-			if t.requests >= t.config.RPM || t.active >= t.config.Concurrency {
+			if retryAfter > 0 {
+				t.totals.RateLimited++
 				a.mu.Unlock()
-				w.Header().Set("Retry-After", "60")
-				writeError(w, 429, "rate_limit_error", "tenant request limit reached")
+				w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+				writeError(w, http.StatusTooManyRequests, "rate_limit_error", "tenant request limit reached")
 				return
 			}
 			t.requests++
+			t.totals.Requests++
 			t.active++
 			a.mu.Unlock()
 			defer func() { a.mu.Lock(); t.active--; a.mu.Unlock() }()
+			r = r.WithContext(context.WithValue(r.Context(), tenantContextKey{}, t))
 		}
 		if a.timeout > 0 {
 			ctx, cancel := context.WithTimeout(r.Context(), a.timeout)
@@ -132,4 +136,27 @@ func (h *Handler) validateModel(model string) error {
 		}
 	}
 	return fmt.Errorf("model is not enabled on this gateway")
+}
+
+func (t *tenantState) resetWindow(now time.Time) {
+	if t.window.IsZero() || !now.Before(t.window.Add(time.Minute)) {
+		t.window = now
+		t.requests = 0
+	}
+}
+
+// The caller holds access.mu when reading tenant state.
+func (a *access) authenticate(r *http.Request) *tenantState {
+	fields := strings.Fields(r.Header.Get("Authorization"))
+	if len(fields) != 2 || !strings.EqualFold(fields[0], "Bearer") {
+		return nil
+	}
+	return a.tenants[sha256.Sum256([]byte(fields[1]))]
+}
+
+func setRequestHeaders(w http.ResponseWriter) {
+	var id [12]byte
+	_, _ = rand.Read(id[:])
+	w.Header().Set("X-Request-ID", hex.EncodeToString(id[:]))
+	w.Header().Set("Cache-Control", "no-store")
 }

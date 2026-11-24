@@ -44,6 +44,16 @@ jobs:
       - name: Build image
         run: docker build -t llm-gateway:ci .
 
+      - name: Start container
+        run: docker run --rm -d --name gateway-ci -p 127.0.0.1:8080:8080 llm-gateway:ci
+      - name: Smoke test container
+        run: |
+          python3 tests/container_smoke.py
+          docker exec gateway-ci /gateway -healthcheck
+      - name: Stop container
+        if: always()
+        run: docker rm -f gateway-ci || true
+
   secrets:
     runs-on: ubuntu-latest
     steps:

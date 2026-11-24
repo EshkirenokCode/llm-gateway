@@ -21,7 +21,7 @@ test-web: ## Test the browser stream reader (Node.js 22+)
 	node --test tests/*.test.mjs
 
 test-docker: ## Run tests with -race inside Linux (no gcc needed on the host)
-	docker run --rm -v "$(CURDIR)":/src -w /src golang:1.27.3-alpine sh -c "apk add --no-cache gcc musl-dev >/dev/null && go test -race -count=1 $(PKG)"
+	docker run --rm -v "$(CURDIR)":/src -w /src golang:1.27.4-alpine sh -c "apk add --no-cache gcc musl-dev >/dev/null && go test -race -count=1 $(PKG)"
 
 vuln: ## Scan reachable vulnerabilities in dependencies and the Go runtime
 	go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
